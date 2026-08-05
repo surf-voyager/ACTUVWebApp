@@ -54,6 +54,13 @@ export const useGcsStore = defineStore('gcs', () => {
 
     const sysLogs = reactive([]);
     const notificationLogs = ref([]); // 新增：全局消息透传日志
+    const controlStatus = reactive({
+        state: 'locked',
+        transitioning: false,
+        armed: false,
+        px4_mode: 'UNKNOWN',
+        reason: null
+    });
 
     function pushNotification(title, message, type = 'info') {
         notificationLogs.value.unshift({
@@ -69,6 +76,9 @@ export const useGcsStore = defineStore('gcs', () => {
     // --- WebSocket 相关变量 ---
     let socket = null;
     let reconnectTimer = null;
+    let heartbeatTimer = null;
+    let socketGeneration = 0;
+    let reconnectEnabled = true;
     const isWsConnected = ref(false);
     const wsUrl = ref(localStorage.getItem('wsUrl') || 'ws://10.168.1.199:8765');
 
@@ -78,26 +88,34 @@ export const useGcsStore = defineStore('gcs', () => {
     // ==========================================
 
     function connectWebSocket() {
-        if (socket && socket.readyState === WebSocket.OPEN) return;
+        if (socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(socket.readyState)) return;
+
+        reconnectEnabled = true;
+        const generation = ++socketGeneration;
 
         console.log(`正在连接后端服务: ${wsUrl.value}`);
-        socket = new WebSocket(wsUrl.value);
+        const nextSocket = new WebSocket(wsUrl.value);
+        socket = nextSocket;
 
-        socket.onopen = () => {
+        nextSocket.onopen = () => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
             console.log("后端连接成功!");
             isWsConnected.value = true;
             pushNotification('系统消息', '地面站后端已连接', 'success');
             if (reconnectTimer) {
-                clearInterval(reconnectTimer);
+                clearTimeout(reconnectTimer);
                 reconnectTimer = null;
             }
             sendPacket("CMD_CONNECT_VEHICLE", {});
             sendPacket("CMD_GET_RECENT_LOGS", {}); // 连接时获取历史日志
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = setInterval(() => sendSimplePacket('heartbeat'), 1000);
         };
-        socket.binaryType = "arraybuffer";
+        nextSocket.binaryType = "arraybuffer";
         const decoder = new TextDecoder('utf-8');
 
-        socket.onmessage = (event) => {
+        nextSocket.onmessage = (event) => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
             try {
                 let jsonString = '';
                 if (event.data instanceof ArrayBuffer) {
@@ -117,17 +135,29 @@ export const useGcsStore = defineStore('gcs', () => {
             }
         };
 
-        socket.onclose = () => {
+        nextSocket.onclose = (event) => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
             socket = null;
-            if (!reconnectTimer) {
-                reconnectTimer = setInterval(connectWebSocket, 3000);
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+            if (event.code === 1013 && event.reason) {
+                pushNotification('连接被拒绝', event.reason, 'warning');
+            }
+            if (reconnectEnabled && !reconnectTimer) {
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
+                    connectWebSocket();
+                }, 3000);
             }
         };
 
-        socket.onerror = (err) => {
+        nextSocket.onerror = (err) => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
@@ -135,13 +165,20 @@ export const useGcsStore = defineStore('gcs', () => {
     }
     
     function disconnectWebSocket() {
+        reconnectEnabled = false;
+        socketGeneration++;
         if (reconnectTimer) {
-            clearInterval(reconnectTimer);
+            clearTimeout(reconnectTimer);
             reconnectTimer = null;
         }
-        if (socket) {
-            socket.close();
-            socket = null;
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+        const oldSocket = socket;
+        socket = null;
+        if (oldSocket) {
+            oldSocket.close();
         }
         isWsConnected.value = false;
         vehicle.connected = false;
@@ -158,7 +195,8 @@ export const useGcsStore = defineStore('gcs', () => {
             localStorage.setItem('wsUrl', newUrl);
             pushNotification('系统消息', '连接地址已更新，正在重新连接...', 'success');
             disconnectWebSocket();
-            setTimeout(connectWebSocket, 500); 
+            reconnectEnabled = true;
+            setTimeout(connectWebSocket, 500);
         };
 
         if (isWsConnected.value) {
@@ -244,7 +282,43 @@ export const useGcsStore = defineStore('gcs', () => {
                 if (payload.health) {
                     vehicle.health.is_home_position_ok = payload.health.is_home_position_ok;
                 }
+                if (payload.control_state) {
+                    Object.assign(controlStatus, payload.control_state);
+                }
                 break;
+            case 'state': {
+                const previousState = controlStatus.state;
+                const previousReason = controlStatus.reason;
+                Object.assign(controlStatus, {
+                    state: msg.state,
+                    transitioning: Boolean(msg.transitioning),
+                    armed: Boolean(msg.armed),
+                    px4_mode: msg.px4_mode || 'UNKNOWN',
+                    reason: msg.reason || null
+                });
+                vehicle.armed = Boolean(msg.armed);
+                if (msg.px4_mode) vehicle.mode = msg.px4_mode;
+
+                if (!controlStatus.transitioning) {
+                    if (controlStatus.reason && controlStatus.reason !== previousReason) {
+                        const isSafetyLock = controlStatus.state === 'locked'
+                            && /自动上锁|连接断开|无消息/.test(controlStatus.reason);
+                        pushNotification(
+                            isSafetyLock ? '安全锁定' : '地面控制失败',
+                            controlStatus.reason,
+                            isSafetyLock ? 'warning' : 'error'
+                        );
+                    } else if (controlStatus.state !== previousState) {
+                        const entered = controlStatus.state === 'manual';
+                        pushNotification(
+                            '地面控制',
+                            entered ? '已进入手操并确认解锁' : '已归零并确认上锁',
+                            entered ? 'success' : 'warning'
+                        );
+                    }
+                }
+                break;
+            }
             case 'DATA_LOG':
                 addLog(payload.text, payload.level);
                 break;
@@ -365,6 +439,29 @@ export const useGcsStore = defineStore('gcs', () => {
             console.log(JSON.stringify(packet))
         }
         socket.send(JSON.stringify(packet));
+    }
+
+    function sendSimplePacket(type, fields = {}) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            if (type !== 'control' && type !== 'heartbeat') {
+                pushNotification('连接警告', '未连接到后端服务', 'warning');
+            }
+            return false;
+        }
+        socket.send(JSON.stringify({type, ...fields}));
+        return true;
+    }
+
+    function requestManual() {
+        return sendSimplePacket('manual');
+    }
+
+    function requestLocked() {
+        return sendSimplePacket('locked');
+    }
+
+    function sendManualControl(throttle, steering) {
+        return sendSimplePacket('control', {throttle, steering});
     }
 
     function updatePlannedMission(latlngs) {
@@ -493,12 +590,16 @@ export const useGcsStore = defineStore('gcs', () => {
         plannerMode,
         areaPoints,
         notificationLogs,
+        controlStatus,
         isWsConnected,
         wsUrl,
 
         connectWebSocket,
         changeWsUrl,
         sendPacket,
+        requestManual,
+        requestLocked,
+        sendManualControl,
         pushNotification,
         updatePlannedMission,
         triggerMapSave,

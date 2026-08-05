@@ -59,9 +59,12 @@
           </div>
           <div class="mode-grid-flat">
             <button class="mode-btn-flat small"
-                    :class="{ 'active': vehicle.mode === 'OFFBOARD' && !isExitingOffboard }"
+                    :class="{ 'active': controlStatus.state === 'manual' }"
+                    :disabled="controlStatus.transitioning"
                     @click="handleGroundControlToggle">
-              {{ vehicle.mode === 'OFFBOARD' && !isExitingOffboard ? '退出地面控制' : '地面控制' }}
+              {{ controlStatus.transitioning
+                  ? '切换中...'
+                  : (controlStatus.state === 'manual' ? '退出地面控制' : '地面控制') }}
             </button>
             <button class="mode-btn-flat small" :class="{ 'active': vehicle.mode === 'MISSION' }"
                     @click="changeMode('MISSION')" :disabled="mission.plannedWaypoints.length === 0">自动任务
@@ -230,8 +233,8 @@
     <!-- 底部控制面板 -->
     <transition name="slide-up">
       <div class="bottom-dashboard"
-           v-if="vehicle.connected && ((vehicle.mode === 'OFFBOARD' && !isExitingOffboard) || vehicle.mode === 'MISSION')">
-        <template v-if="vehicle.mode === 'OFFBOARD' && !isExitingOffboard">
+           v-if="vehicle.connected && ((controlStatus.state === 'manual' && !controlStatus.transitioning) || vehicle.mode === 'MISSION')">
+        <template v-if="controlStatus.state === 'manual' && !controlStatus.transitioning">
           <div class="joystick-box left">
             <div class="joystick-field">
               <VirtualJoystick @update="handleLeftStick" @end="resetLeftStick" lockY/>
@@ -239,20 +242,9 @@
             <span class="stick-label">油门控制</span>
           </div>
           <div class="center-panel">
-            <div class="manual-controls">
-              <div class="mode-switch-group">
-                <div class="switch-item" :class="{ active: offboardSubMode === 'STEADY' }"
-                     @click="handleSubModeChange('STEADY')">稳态控制
-                </div>
-                <div class="switch-item" :class="{ active: offboardSubMode === 'ACRO' }"
-                     @click="handleSubModeChange('ACRO')">特技控制
-                </div>
+              <div class="manual-controls">
+                <div class="control-hint">PX4 MANUAL · 推进器直接控制</div>
               </div>
-              <div class="control-hint">{{
-                  offboardSubMode === 'STEADY' ? '辅助定速巡航模式' : '直接电机推力控制'
-                }}
-              </div>
-            </div>
           </div>
           <div class="joystick-box right">
             <div class="joystick-field">
@@ -429,11 +421,9 @@ import {
 import {ElMessageBox} from 'element-plus';
 
 const store = useGcsStore();
-const {vehicle, sysLogs, notificationLogs, mission, mapTriggers, isWsConnected, wsUrl} = storeToRefs(store);
+const {vehicle, sysLogs, notificationLogs, mission, mapTriggers, isWsConnected, wsUrl, controlStatus} = storeToRefs(store);
 
 // --- 状态变量 ---
-const offboardSubMode = ref('STEADY');
-const isExitingOffboard = ref(false);
 const missionState = ref('EXECUTING');
 const lastMissionStartTime = ref(0);
 const lastTargetIndex = ref(0);
@@ -526,7 +516,7 @@ const changeMode = (mode, payload_extra = {}) => {
   } else {
     executeChangeMode(mode, payload_extra);
   }
-  if (['OFFBOARD', 'RTL'].includes(mode)) {
+  if (mode === 'RTL') {
     if (!vehicle.value.armed) {
       sendArmCommand('ARM', false);
     }
@@ -534,33 +524,30 @@ const changeMode = (mode, payload_extra = {}) => {
 };
 
 const handleGroundControlToggle = () => {
-  if (vehicle.value.mode === 'OFFBOARD') {
-    // 先在本地停止控制循环，避免等待后端状态回传期间继续发送控制量。
-    isExitingOffboard.value = true;
+  if (controlStatus.value.transitioning) return;
+
+  if (controlStatus.value.state === 'manual') {
     stopManualControlLoop();
     controlState.value = {throttle: 0.0, steering: 0.0};
-
-    // 退出前发送最后一帧安全设定值，再让后端停止 Offboard 并进入 HOLD。
-    store.sendPacket('CMD_MANUAL_CONTROL', buildManualControlPacket());
-    executeChangeMode('HOLD', {});
-    store.pushNotification('模式切换', '正在退出地面控制并进入 HOLD', 'info');
+    store.requestLocked();
+    store.pushNotification('地面控制', '正在归零并请求后端上锁', 'info');
     return;
   }
 
-  isExitingOffboard.value = false;
-  changeMode('OFFBOARD');
+  store.requestManual();
+  store.pushNotification('地面控制', '正在请求后端进入 MANUAL 并解锁', 'info');
 };
 
 const handlePause = () => {
-  sendArmCommand('DISARM', false);
+  store.requestLocked();
   store.setRelay(0);
-  store.pushNotification('暂停模式', '电机已上锁，混合器已关闭', 'warning');
+  store.pushNotification('暂停模式', '正在归零、上锁并关闭混合器', 'warning');
 };
 
 const handleSystemStop = () => {
   store.setRelay(0);
-  sendArmCommand('DISARM', false);
-  store.pushNotification('系统停机', '已执行紧急停机：混合器关闭，电机上锁', 'error');
+  store.requestLocked();
+  store.pushNotification('系统停机', '正在关闭混合器并请求后端安全上锁', 'error');
 };
 
 const confirmMissionStart = () => {
@@ -619,12 +606,6 @@ const jumpToWaypoint = () => {
       store.pushNotification('指令发送', `已请求跳转到航点 ${manualWaypointIndex.value}`, 'success');
     });
   }
-};
-
-const handleSubModeChange = (val) => {
-  offboardSubMode.value = val;
-  store.sendPacket('CMD_SET_OFFBOARD_SUBMODE', {submode: val});
-  store.pushNotification('模式切换', `手动模式已切换至 ${val === 'STEADY' ? '稳态' : '特技'}`, 'info');
 };
 
 const handleCenterMap = () => {
@@ -723,22 +704,13 @@ const confirmGoto = () => {
 
 // --- 摇杆逻辑 ---
 const controlState = ref({throttle: 0.0, steering: 0.0});
-const targetYaw = ref(0.0);
 let controlLoop = null;
-
-const buildManualControlPacket = () => {
-  const lx = controlState.value.throttle;
-  const rx = controlState.value.steering;
-  return offboardSubMode.value === 'STEADY'
-      ? {x: 0, y: 0, z: lx, r: targetYaw.value += rx * 3}
-      : {x: lx, y: 0, z: 0, r: rx * 6};
-};
 
 const startManualControlLoop = () => {
   if (controlLoop) return;
   controlLoop = setInterval(() => {
-    if (vehicle.value.mode === 'OFFBOARD' && !isExitingOffboard.value) {
-      store.sendPacket('CMD_MANUAL_CONTROL', buildManualControlPacket());
+    if (controlStatus.value.state === 'manual' && !controlStatus.value.transitioning) {
+      store.sendManualControl(controlState.value.throttle, controlState.value.steering);
     }
   }, 100);
 };
@@ -749,14 +721,12 @@ const stopManualControlLoop = () => {
   controlLoop = null;
 };
 
-watch(() => vehicle.value.mode, (newMode) => {
-  if (newMode === 'OFFBOARD' && !isExitingOffboard.value) {
+watch(() => [controlStatus.value.state, controlStatus.value.transitioning], ([state, transitioning]) => {
+  if (state === 'manual' && !transitioning) {
     startManualControlLoop();
   } else {
     stopManualControlLoop();
-    if (newMode !== 'OFFBOARD') {
-      isExitingOffboard.value = false;
-    }
+    controlState.value = {throttle: 0.0, steering: 0.0};
   }
 }, {immediate: true});
 
