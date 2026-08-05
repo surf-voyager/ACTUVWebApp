@@ -68,6 +68,13 @@ onUnmounted(() => {
 
 // --- 初始化地图 ---
 const initMap = () => {
+
+  // 全局坐标显示精度改为 8 位小数
+  const _formatNum = L.Util.formatNum;
+  L.Util.formatNum = function (num, digits) {
+    return _formatNum(num, digits || 8);
+  };
+
   map = L.map('map-container', {
     zoomControl: false,
     attributionControl: false,
@@ -153,7 +160,7 @@ const initBoat = () => {
     iconSize: [48, 48],
     iconAnchor: [24, 24],
   });
-  const startLat = vehicle.value.position.lat || 45.77;
+  const startLat = vehicle.value.position.lat || 45.99;
   const startLng = vehicle.value.position.lng || 126.67;
   boatMarker = L.marker([startLat, startLng], {
     icon: boatIcon,

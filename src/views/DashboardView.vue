@@ -58,8 +58,10 @@
             <span>飞行模式</span>
           </div>
           <div class="mode-grid-flat">
-            <button class="mode-btn-flat small" :class="{ 'active': vehicle.mode === 'OFFBOARD' }"
-                    @click="changeMode('OFFBOARD')">地面控制
+            <button class="mode-btn-flat small"
+                    :class="{ 'active': vehicle.mode === 'OFFBOARD' && !isExitingOffboard }"
+                    @click="handleGroundControlToggle">
+              {{ vehicle.mode === 'OFFBOARD' && !isExitingOffboard ? '退出地面控制' : '地面控制' }}
             </button>
             <button class="mode-btn-flat small" :class="{ 'active': vehicle.mode === 'MISSION' }"
                     @click="changeMode('MISSION')" :disabled="mission.plannedWaypoints.length === 0">自动任务
@@ -218,8 +220,8 @@
         <div class="telemetry-item position-item">
           <span class="label">当前位置</span>
           <div class="coords">
-            <span>{{ (vehicle.position.lat ?? 0).toFixed(6) }} N</span>
-            <span>{{ (vehicle.position.lng ?? 0).toFixed(6) }} E</span>
+            <span>{{ (vehicle.position.lat ?? 0).toFixed(7) }} N</span>
+            <span>{{ (vehicle.position.lng ?? 0).toFixed(7) }} E</span>
           </div>
         </div>
       </div>
@@ -227,8 +229,9 @@
 
     <!-- 底部控制面板 -->
     <transition name="slide-up">
-      <div class="bottom-dashboard" v-if="vehicle.connected && ['OFFBOARD', 'MISSION'].includes(vehicle.mode)">
-        <template v-if="vehicle.mode === 'OFFBOARD'">
+      <div class="bottom-dashboard"
+           v-if="vehicle.connected && ((vehicle.mode === 'OFFBOARD' && !isExitingOffboard) || vehicle.mode === 'MISSION')">
+        <template v-if="vehicle.mode === 'OFFBOARD' && !isExitingOffboard">
           <div class="joystick-box left">
             <div class="joystick-field">
               <VirtualJoystick @update="handleLeftStick" @end="resetLeftStick" lockY/>
@@ -380,8 +383,8 @@
           <div class="safety-check-item">
             <span class="label">目标位置 (Target)</span>
             <span class="value info" v-if="mission.plannedWaypoints.length > 0">
-              {{ mission.plannedWaypoints[missionStartDialog.startIndex - 1]?.lat.toFixed(6) }}, 
-              {{ mission.plannedWaypoints[missionStartDialog.startIndex - 1]?.lng.toFixed(6) }}
+              {{ mission.plannedWaypoints[missionStartDialog.startIndex - 1]?.lat.toFixed(7) }},
+              {{ mission.plannedWaypoints[missionStartDialog.startIndex - 1]?.lng.toFixed(7) }}
             </span>
             <span class="value error" v-else>无航点数据</span>
           </div>
@@ -406,7 +409,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
+import {computed, onUnmounted, ref, watch} from 'vue';
 import {useGcsStore} from '../store/useGcsStore';
 import {storeToRefs} from 'pinia';
 import VirtualJoystick from '../components/Cockpit/VirtualJoystick.vue';
@@ -430,6 +433,7 @@ const {vehicle, sysLogs, notificationLogs, mission, mapTriggers, isWsConnected, 
 
 // --- 状态变量 ---
 const offboardSubMode = ref('STEADY');
+const isExitingOffboard = ref(false);
 const missionState = ref('EXECUTING');
 const lastMissionStartTime = ref(0);
 const lastTargetIndex = ref(0);
@@ -527,6 +531,24 @@ const changeMode = (mode, payload_extra = {}) => {
       sendArmCommand('ARM', false);
     }
   }
+};
+
+const handleGroundControlToggle = () => {
+  if (vehicle.value.mode === 'OFFBOARD') {
+    // 先在本地停止控制循环，避免等待后端状态回传期间继续发送控制量。
+    isExitingOffboard.value = true;
+    stopManualControlLoop();
+    controlState.value = {throttle: 0.0, steering: 0.0};
+
+    // 退出前发送最后一帧安全设定值，再让后端停止 Offboard 并进入 HOLD。
+    store.sendPacket('CMD_MANUAL_CONTROL', buildManualControlPacket());
+    executeChangeMode('HOLD', {});
+    store.pushNotification('模式切换', '正在退出地面控制并进入 HOLD', 'info');
+    return;
+  }
+
+  isExitingOffboard.value = false;
+  changeMode('OFFBOARD');
 };
 
 const handlePause = () => {
@@ -704,18 +726,39 @@ const controlState = ref({throttle: 0.0, steering: 0.0});
 const targetYaw = ref(0.0);
 let controlLoop = null;
 
-onMounted(() => {
+const buildManualControlPacket = () => {
+  const lx = controlState.value.throttle;
+  const rx = controlState.value.steering;
+  return offboardSubMode.value === 'STEADY'
+      ? {x: 0, y: 0, z: lx, r: targetYaw.value += rx * 3}
+      : {x: lx, y: 0, z: 0, r: rx * 6};
+};
+
+const startManualControlLoop = () => {
+  if (controlLoop) return;
   controlLoop = setInterval(() => {
-    if (vehicle.value.mode === 'OFFBOARD') {
-      const lx = controlState.value.throttle;
-      const rx = controlState.value.steering;
-      let packet = (offboardSubMode.value === 'STEADY')
-          ? {x: 0, y: 0, z: lx, r: targetYaw.value += rx * 3}
-          : {x: lx, y: 0, z: 0, r: rx * 6};
-      store.sendPacket("CMD_MANUAL_CONTROL", packet);
+    if (vehicle.value.mode === 'OFFBOARD' && !isExitingOffboard.value) {
+      store.sendPacket('CMD_MANUAL_CONTROL', buildManualControlPacket());
     }
   }, 100);
-});
+};
+
+const stopManualControlLoop = () => {
+  if (!controlLoop) return;
+  clearInterval(controlLoop);
+  controlLoop = null;
+};
+
+watch(() => vehicle.value.mode, (newMode) => {
+  if (newMode === 'OFFBOARD' && !isExitingOffboard.value) {
+    startManualControlLoop();
+  } else {
+    stopManualControlLoop();
+    if (newMode !== 'OFFBOARD') {
+      isExitingOffboard.value = false;
+    }
+  }
+}, {immediate: true});
 
 const handleLeftStick = (vec) => controlState.value.throttle = vec.y;
 const resetLeftStick = () => controlState.value.throttle = 0;
@@ -723,7 +766,7 @@ const handleRightStick = (vec) => controlState.value.steering = vec.x;
 const resetRightStick = () => controlState.value.steering = 0;
 
 onUnmounted(() => {
-  if (controlLoop) clearInterval(controlLoop);
+  stopManualControlLoop();
   if (reconnectTimer) clearInterval(reconnectTimer);
   if (cooldownTimer) clearInterval(cooldownTimer);
 });
