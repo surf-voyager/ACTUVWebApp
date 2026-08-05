@@ -20,12 +20,11 @@ export const useGcsStore = defineStore('gcs', () => {
         },
         gps: {sats: 0, fix: 'No Fix'},
         attitude: {roll: 0, pitch: 0, yaw: 0},
-        position: {lat: 45.7700000, lng: 126.6700000, alt: 0.00}, // 默认位置
+        position: {lat: 45.7700000, lng: 126.6700000}, // 默认位置
         home: null, // 新增：HOME点坐标
         velocity: {speed: 0},
         trajectory: [], //  <--- 轨迹
         relay_on: false, // <--- 继电器状态
-        health: {is_global_position_ok: false, is_home_position_ok: false, is_armable: false} // 新增：健康状态
     })
 
     // --- 2. 任务数据 ---
@@ -225,15 +224,6 @@ export const useGcsStore = defineStore('gcs', () => {
         const {type, payload} = msg;
 
         switch (type) {
-            // case 'DATA_NAV':
-            //     if (payload.position && payload.position.lat) {
-            //         console.log('Raw lat from backend:', payload.position.lat); // ← 加这行
-            //         vehicle.position.lat = payload.position.lat;
-            //         vehicle.position.lng = payload.position.lon;
-            //         vehicle.position.alt = payload.position.rel_alt;
-            //         // 添加到轨迹
-            //         vehicle.trajectory.push([payload.position.lat, payload.position.lon]);
-            //     }
             case 'DATA_NAV':
                 if (payload.position && payload.position.lat) {
                     // 1. 先除以 1e7 (10^7)
@@ -244,12 +234,6 @@ export const useGcsStore = defineStore('gcs', () => {
                     // 这一步至关重要：即使原始数据是整数（如 45.7700000），toFixed 也能保证显示 7 位
                     vehicle.position.lat = parseFloat(rawLat.toFixed(7));
                     vehicle.position.lng = parseFloat(rawLon.toFixed(7));
-
-                    // 高度转换 (毫米转米)
-                    vehicle.position.alt = parseFloat((payload.position.rel_alt / 1000).toFixed(2));
-
-                    // 打印日志核对（对比 QGC 的 45.7766860）
-                    console.log('QGC Raw Int:', payload.position.lat, '-> JS Float:', vehicle.position.lat);
 
                     // 轨迹数据存入
                     vehicle.trajectory.push([vehicle.position.lat, vehicle.position.lng]);
@@ -278,9 +262,6 @@ export const useGcsStore = defineStore('gcs', () => {
                 if (payload.gps) vehicle.gps = {sats: payload.gps.sat_count, fix: payload.gps.fix_type};
                 if (payload.home && payload.home.lat && payload.home.lon) {
                     vehicle.home = payload.home;
-                }
-                if (payload.health) {
-                    vehicle.health.is_home_position_ok = payload.health.is_home_position_ok;
                 }
                 if (payload.control_state) {
                     Object.assign(controlStatus, payload.control_state);
