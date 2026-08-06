@@ -10,6 +10,7 @@
           <component :is="Component"/>
         </keep-alive>
       </router-view>
+      <LeakAlertOverlay />
 <!--      <div class="global-map-controls">-->
 <!--        <el-tooltip content="定位到船只" placement="left">-->
 <!--          <button class="control-btn" @click="handleFocusBoat">-->
@@ -40,11 +41,13 @@
 </template>
 
 <script setup>
-import {onMounted, ref, watch} from 'vue'
+import {onMounted, onUnmounted, ref, watch} from 'vue'
 import {useRouter} from 'vue-router'
 import {useGcsStore} from './store/useGcsStore'
 import BaseMap from './components/Map/BaseMap.vue'
+import LeakAlertOverlay from './components/Alert/LeakAlertOverlay.vue'
 import {MapLocation, Monitor,Aim} from '@element-plus/icons-vue'
+import {disposeLeakAlarmAudio, primeLeakAlarmAudio} from './services/leakAlarmAudio'
 const mapRef = ref(null)
 const router = useRouter()
 const store = useGcsStore()
@@ -67,8 +70,26 @@ watch(() => store.mapTriggers.centerMap, (newVal) => {
     store.mapTriggers.centerMap = false; // 立即复位，保证下次点击还能触发
   }
 });
+const activateAlarmAudio = () => {
+  void primeLeakAlarmAudio();
+};
+
+const audioActivationOptions = {once: true, capture: true};
+
 onMounted(() => {
-  store.connectWebSocket()
+  store.startLeakAlertWatchdog();
+  store.connectWebSocket();
+  window.addEventListener('pointerdown', activateAlarmAudio, audioActivationOptions);
+  window.addEventListener('touchstart', activateAlarmAudio, audioActivationOptions);
+  window.addEventListener('keydown', activateAlarmAudio, audioActivationOptions);
+})
+
+onUnmounted(() => {
+  store.stopLeakAlertWatchdog();
+  window.removeEventListener('pointerdown', activateAlarmAudio, true);
+  window.removeEventListener('touchstart', activateAlarmAudio, true);
+  window.removeEventListener('keydown', activateAlarmAudio, true);
+  void disposeLeakAlarmAudio();
 })
 </script>
 

@@ -60,6 +60,30 @@ export const useGcsStore = defineStore('gcs', () => {
         px4_mode: 'UNKNOWN',
         reason: null
     });
+    const leakAlert = reactive({
+        detected: false,
+        sensorFault: false,
+        faultCode: null,
+        phase: 'NORMAL',
+        lastAlertReceivedAt: 0,
+        lastBackendMessageAt: 0,
+        channelConnectedAt: 0,
+        lingerDeadline: 0,
+        lingerRemainingSeconds: 0,
+        communicationLost: false,
+        rtlRequestId: null,
+        rtlStatus: 'IDLE',
+        rtlMessage: null
+    });
+
+    const LEAK_ALERT_STALE_MS = 1000;
+    const BACKEND_CHANNEL_STALE_MS = 1500;
+    const LEAK_ALERT_LINGER_MS = 10000;
+    let leakWatchdogTimer = null;
+    let leakRtlTimeout = null;
+    let requestSequence = 0;
+
+    const monotonicNow = () => performance.now();
 
     function pushNotification(title, message, type = 'info') {
         notificationLogs.value.unshift({
@@ -100,6 +124,7 @@ export const useGcsStore = defineStore('gcs', () => {
             if (generation !== socketGeneration || socket !== nextSocket) return;
             console.log("后端连接成功!");
             isWsConnected.value = true;
+            leakAlert.channelConnectedAt = monotonicNow();
             pushNotification('系统消息', '地面站后端已连接', 'success');
             if (reconnectTimer) {
                 clearTimeout(reconnectTimer);
@@ -139,6 +164,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
+            markLeakChannelDisconnected();
             socket = null;
             if (heartbeatTimer) {
                 clearInterval(heartbeatTimer);
@@ -160,6 +186,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
+            markLeakChannelDisconnected();
         };
     }
     
@@ -181,6 +208,7 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         isWsConnected.value = false;
         vehicle.connected = false;
+        markLeakChannelDisconnected();
     }
 
     function changeWsUrl(newUrl) {
@@ -219,9 +247,149 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
 
+    function clearLeakRtlTimeout() {
+        if (leakRtlTimeout) {
+            clearTimeout(leakRtlTimeout);
+            leakRtlTimeout = null;
+        }
+    }
+
+    function resetLeakRtlState() {
+        clearLeakRtlTimeout();
+        leakAlert.rtlRequestId = null;
+        leakAlert.rtlStatus = 'IDLE';
+        leakAlert.rtlMessage = null;
+    }
+
+    function handleLeakAlert(payload = {}) {
+        const wasDetected = leakAlert.detected;
+        const hadSensorFault = leakAlert.sensorFault;
+        const detected = Boolean(payload.detected);
+        const sensorFault = Boolean(payload.sensor_fault);
+
+        leakAlert.lastAlertReceivedAt = monotonicNow();
+        leakAlert.lingerDeadline = 0;
+        leakAlert.lingerRemainingSeconds = 0;
+        leakAlert.communicationLost = false;
+        if (!detected && !sensorFault) {
+            beginLeakAlertLinger();
+            return;
+        }
+
+        leakAlert.detected = detected;
+        leakAlert.sensorFault = sensorFault;
+        leakAlert.faultCode = payload.fault_code || null;
+
+        if (detected && sensorFault) {
+            leakAlert.phase = 'LEAK_WITH_SENSOR_FAULT';
+        } else if (detected) {
+            leakAlert.phase = 'LEAK_ACTIVE';
+        } else if (sensorFault) {
+            leakAlert.phase = 'SENSOR_FAULT_ACTIVE';
+        }
+
+        if (detected && !wasDetected) {
+            resetLeakRtlState();
+            pushNotification('漏水告警', '检测到舱内漏水', 'error');
+        }
+        if (sensorFault && !hadSensorFault) {
+            pushNotification('传感器故障', '漏水传感器状态异常', 'warning');
+        }
+    }
+
+    function beginLeakAlertLinger() {
+        const hadLeak = leakAlert.detected
+            || leakAlert.phase === 'LEAK_ACTIVE'
+            || leakAlert.phase === 'LEAK_UNKNOWN'
+            || leakAlert.phase === 'LEAK_WITH_SENSOR_FAULT';
+        const hadFault = leakAlert.sensorFault
+            || leakAlert.phase === 'SENSOR_FAULT_ACTIVE';
+
+        if (!hadLeak && !hadFault) return;
+
+        leakAlert.detected = false;
+        leakAlert.sensorFault = false;
+        leakAlert.faultCode = null;
+        leakAlert.communicationLost = false;
+        leakAlert.phase = hadLeak ? 'LEAK_LINGER' : 'SENSOR_FAULT_LINGER';
+        leakAlert.lingerDeadline = monotonicNow() + LEAK_ALERT_LINGER_MS;
+        leakAlert.lingerRemainingSeconds = Math.ceil(LEAK_ALERT_LINGER_MS / 1000);
+        pushNotification(
+            hadLeak ? '漏水观察' : '传感器恢复',
+            hadLeak ? '漏水信号已停止，持续观察 10 秒' : '漏水传感器已恢复，持续观察 10 秒',
+            hadLeak ? 'warning' : 'success'
+        );
+    }
+
+    function finishLeakAlertLinger() {
+        leakAlert.detected = false;
+        leakAlert.sensorFault = false;
+        leakAlert.faultCode = null;
+        leakAlert.phase = 'NORMAL';
+        leakAlert.lingerDeadline = 0;
+        leakAlert.lingerRemainingSeconds = 0;
+        leakAlert.communicationLost = false;
+        resetLeakRtlState();
+    }
+
+    function markLeakChannelDisconnected() {
+        if (leakAlert.detected) {
+            if (!leakAlert.communicationLost) {
+                pushNotification('漏水告警', '通信中断，漏水状态未知', 'error');
+            }
+            leakAlert.communicationLost = true;
+            leakAlert.phase = 'LEAK_UNKNOWN';
+        } else if (leakAlert.sensorFault) {
+            leakAlert.communicationLost = true;
+            leakAlert.phase = 'SENSOR_FAULT_ACTIVE';
+        }
+    }
+
+    function evaluateLeakAlertState() {
+        const now = monotonicNow();
+        if (leakAlert.phase === 'LEAK_LINGER' || leakAlert.phase === 'SENSOR_FAULT_LINGER') {
+            const remainingMs = Math.max(0, leakAlert.lingerDeadline - now);
+            leakAlert.lingerRemainingSeconds = Math.ceil(remainingMs / 1000);
+            if (leakAlert.lingerDeadline > 0 && remainingMs <= 0) {
+                finishLeakAlertLinger();
+            }
+            return;
+        }
+
+        if (!leakAlert.detected && !leakAlert.sensorFault) return;
+        if (now - leakAlert.lastAlertReceivedAt < LEAK_ALERT_STALE_MS) return;
+
+        const backendChannelHealthy = isWsConnected.value
+            && now - leakAlert.lastBackendMessageAt <= BACKEND_CHANNEL_STALE_MS;
+        if (!backendChannelHealthy) {
+            markLeakChannelDisconnected();
+            return;
+        }
+        if (leakAlert.communicationLost
+            && now - leakAlert.channelConnectedAt < LEAK_ALERT_STALE_MS) {
+            return;
+        }
+        beginLeakAlertLinger();
+    }
+
+    function startLeakAlertWatchdog() {
+        if (leakWatchdogTimer) return;
+        leakWatchdogTimer = setInterval(evaluateLeakAlertState, 200);
+    }
+
+    function stopLeakAlertWatchdog() {
+        if (leakWatchdogTimer) {
+            clearInterval(leakWatchdogTimer);
+            leakWatchdogTimer = null;
+        }
+        clearLeakRtlTimeout();
+    }
+
+
     // --- 消息分发处理 ---
     function handleIncomingMessage(msg) {
         const {type, payload} = msg;
+        leakAlert.lastBackendMessageAt = monotonicNow();
 
         switch (type) {
             case 'DATA_NAV':
@@ -266,6 +434,9 @@ export const useGcsStore = defineStore('gcs', () => {
                 if (payload.control_state) {
                     Object.assign(controlStatus, payload.control_state);
                 }
+                break;
+            case 'DATA_LEAK_ALERT':
+                handleLeakAlert(payload);
                 break;
             case 'state': {
                 const previousState = controlStatus.state;
@@ -342,7 +513,26 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function handleAck(payload) {
-        const {command_type, success, message} = payload;
+        const {request_id, command_type, success, message} = payload;
+        const isLeakRtlAck = command_type === 'CMD_SET_MODE'
+            && request_id
+            && request_id === leakAlert.rtlRequestId;
+
+        if (isLeakRtlAck) {
+            clearLeakRtlTimeout();
+            leakAlert.rtlRequestId = null;
+            leakAlert.rtlStatus = success ? 'SUCCESS' : 'ERROR';
+            leakAlert.rtlMessage = success
+                ? '返航指令已接受'
+                : (message || '返航指令执行失败');
+            pushNotification(
+                success ? '漏水返航' : '返航失败',
+                leakAlert.rtlMessage,
+                success ? 'success' : 'error'
+            );
+            return;
+        }
+
         if (success) {
             if (command_type !== 'CMD_MANUAL_CONTROL' && command_type !== 'CMD_SET_RELAY' && command_type !== 'CMD_GET_RECENT_LOGS') {
                 pushNotification('指令成功', message || '指令执行成功', 'success');
@@ -409,17 +599,53 @@ export const useGcsStore = defineStore('gcs', () => {
             if (type !== 'CMD_MANUAL_CONTROL') {
                 pushNotification('连接警告', '未连接到后端服务', 'warning');
             }
-            return;
+            return null;
         }
+        requestSequence += 1;
+        const requestId = `${Date.now()}-${requestSequence}`;
         const packet = {
             type: type,
             payload: payload,
-            request_id: Date.now().toString()
+            request_id: requestId
         };
         if(packet.type!=="CMD_MANUAL_CONTROL"){
             console.log(JSON.stringify(packet))
         }
         socket.send(JSON.stringify(packet));
+        return requestId;
+    }
+
+    function requestLeakReturn() {
+        if (leakAlert.rtlStatus === 'PENDING') return false;
+        if (!isWsConnected.value) {
+            pushNotification('返航失败', '后端通信已断开，无法执行返航', 'error');
+            return false;
+        }
+        if (!vehicle.connected) {
+            pushNotification('返航失败', 'PX4 未连接，无法执行返航', 'error');
+            return false;
+        }
+        if (!vehicle.armed) {
+            pushNotification('返航提示', '当前未解锁，无法执行返航', 'warning');
+            return false;
+        }
+
+        const requestId = sendPacket('CMD_SET_MODE', {mode: 'RTL'});
+        if (!requestId) return false;
+
+        clearLeakRtlTimeout();
+        leakAlert.rtlRequestId = requestId;
+        leakAlert.rtlStatus = 'PENDING';
+        leakAlert.rtlMessage = '正在请求返航…';
+        leakRtlTimeout = setTimeout(() => {
+            if (leakAlert.rtlRequestId !== requestId) return;
+            leakAlert.rtlRequestId = null;
+            leakAlert.rtlStatus = 'ERROR';
+            leakAlert.rtlMessage = '返航请求超时，请重试';
+            pushNotification('返航超时', leakAlert.rtlMessage, 'error');
+            leakRtlTimeout = null;
+        }, 3000);
+        return true;
     }
 
     function sendSimplePacket(type, fields = {}) {
@@ -572,6 +798,7 @@ export const useGcsStore = defineStore('gcs', () => {
         areaPoints,
         notificationLogs,
         controlStatus,
+        leakAlert,
         isWsConnected,
         wsUrl,
 
@@ -581,6 +808,9 @@ export const useGcsStore = defineStore('gcs', () => {
         requestManual,
         requestLocked,
         sendManualControl,
+        requestLeakReturn,
+        startLeakAlertWatchdog,
+        stopLeakAlertWatchdog,
         pushNotification,
         updatePlannedMission,
         triggerMapSave,
