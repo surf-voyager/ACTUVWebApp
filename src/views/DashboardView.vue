@@ -210,13 +210,36 @@
           </div>
         </div>
         <div class="divider"></div>
-        <div class="telemetry-item">
+        <div class="telemetry-item motion-item">
           <span class="label">运动状态</span>
-          <div class="val-group">
-            <span class="value">{{ (vehicle.velocity.speed ?? 0).toFixed(1) }}<small>m/s</small></span>
-            <div class="sub-label-wrap"><span class="sub-label">实时航向: {{
-                (vehicle.attitude.yaw ?? 0).toFixed(0)
-              }}°</span></div>
+          <div class="val-group motion-val-group">
+            <div class="motion-primary-row">
+              <span class="value speed-readout">
+                <small class="motion-metric-label">航速</small>
+                <span>{{ formatOneDecimal(vehicle.velocity.speed) }}</span><small>m/s</small>
+              </span>
+              <span class="value heading-readout">
+                <small class="motion-metric-label">航向</small>
+                <span>{{ formatHeading(vehicle.attitude.yaw) }}</span><small>°</small>
+              </span>
+            </div>
+            <div class="sub-label-wrap tilt-row">
+              <span class="sub-label tilt-reading">
+                <small class="motion-metric-label">横倾</small>
+                <span
+                    class="tilt-value"
+                    :class="{ 'tilt-warning': isTiltWarning(vehicle.attitude.roll) }"
+                >{{ formatOneDecimal(vehicle.attitude.roll) }}°</span>
+              </span>
+              <span class="tilt-separator">|</span>
+              <span class="sub-label tilt-reading">
+                <small class="motion-metric-label">纵倾</small>
+                <span
+                    class="tilt-value"
+                    :class="{ 'tilt-warning': isTiltWarning(vehicle.attitude.pitch) }"
+                >{{ formatOneDecimal(vehicle.attitude.pitch) }}°</span>
+              </span>
+            </div>
           </div>
         </div>
         <div class="divider"></div>
@@ -477,6 +500,27 @@ watch(() => mapTriggers.value.gotoTargetCandidate, (newTarget) => {
 }, {deep: true});
 
 // --- 辅助计算 ---
+const toFiniteNumber = (value) => {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : 0;
+};
+
+const formatOneDecimal = (value) => {
+  const roundedValue = Math.round(toFiniteNumber(value) * 10) / 10;
+  return (Object.is(roundedValue, -0) ? 0 : roundedValue).toFixed(1);
+};
+
+const formatHeading = (value) => {
+  const normalizedValue = ((toFiniteNumber(value) % 360) + 360) % 360;
+  const roundedValue = Math.round(normalizedValue * 10) / 10;
+  return (roundedValue >= 360 ? 0 : roundedValue).toFixed(1);
+};
+
+const isTiltWarning = (value) => {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && Math.abs(numericValue) > 10;
+};
+
 const getBatColor = computed(() => {
   const pct = vehicle.value.battery.remaining_percent;
   if (pct <= vehicle.value.battery.low_battery_threshold) return '#f56c6c';
@@ -1019,7 +1063,7 @@ onUnmounted(() => {
   top: 20px;
   left: 300px;
   right: 300px; /* 避开左右面板 */
-  height: 90px;
+  height: 98px;
   background: rgba(20, 20, 20, 0.75);
   backdrop-filter: blur(15px);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -1056,6 +1100,66 @@ onUnmounted(() => {
   gap: 4px;
   min-width: 110px;
   flex-shrink: 0;
+}
+
+.motion-item {
+  width: 170px;
+  min-width: 170px;
+}
+
+.motion-val-group {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.motion-primary-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.motion-item .value {
+  font-size: 22px;
+}
+
+.motion-item .value small {
+  margin-left: 3px;
+}
+
+.speed-readout,
+.heading-readout {
+  display: inline-flex;
+  align-items: center;
+}
+
+.motion-metric-label {
+  margin-left: 0 !important;
+  margin-right: 3px;
+  color: #ffffff;
+}
+
+.tilt-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tilt-value {
+  transition: color 0.2s ease, text-shadow 0.2s ease;
+}
+
+.tilt-separator {
+  color: rgba(255, 255, 255, 0.28);
+  font-size: 12px;
+}
+
+.tilt-warning {
+  color: #f56c6c !important;
+  text-shadow: 0 0 8px rgba(245, 108, 108, 0.45) !important;
 }
 
 .telemetry-item .label {
