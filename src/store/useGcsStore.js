@@ -75,15 +75,66 @@ export const useGcsStore = defineStore('gcs', () => {
         rtlStatus: 'IDLE',
         rtlMessage: null
     });
+    const infoQuery = reactive({
+        selectedId: 'PX4_POWER_VOLTAGE',
+        phase: 'IDLE',
+        pendingRequestId: null,
+        pendingQueryId: null,
+        result: null,
+        displayText: '请选择查询项目后点击查询'
+    });
 
     const LEAK_ALERT_STALE_MS = 1000;
     const BACKEND_CHANNEL_STALE_MS = 1500;
     const LEAK_ALERT_LINGER_MS = 10000;
+    const INFO_QUERY_TIMEOUT_MS = 6000;
+    const INFO_QUERY_ERROR_TEXT = {
+        INVALID_REQUEST: '查询失败：请求格式错误',
+        UNSUPPORTED_QUERY: '查询失败：不支持该查询项目',
+        PX4_NOT_CONNECTED: '查询失败：飞控未连接',
+        QUERY_BUSY: '查询失败：已有查询正在进行',
+        QUERY_TIMEOUT: '查询超时，请重试',
+        MAVLINK_ERROR: '查询失败：飞控通信异常',
+        PARSE_ERROR: '查询失败：无法解析飞控返回信息',
+        BACKEND_DISCONNECTED: '查询失败：后端连接已断开',
+        FRONTEND_TIMEOUT: '查询超时，请重试',
+        INVALID_RESULT: '查询失败：返回数据格式错误'
+    };
+    const INFO_QUERY_FORMATTERS = {
+        PX4_POWER_VOLTAGE(data) {
+            const voltage = Number(data?.voltage_v);
+            if (!Number.isFinite(voltage)) throw new Error('INVALID_RESULT');
+            return `飞控供电电压：${voltage.toFixed(2)}V`;
+        }
+    };
     let leakWatchdogTimer = null;
     let leakRtlTimeout = null;
+    let infoQueryTimeout = null;
     let requestSequence = 0;
 
     const monotonicNow = () => performance.now();
+
+    function clearInfoQueryTimeout() {
+        if (infoQueryTimeout) {
+            clearTimeout(infoQueryTimeout);
+            infoQueryTimeout = null;
+        }
+    }
+
+    function finishInfoQueryError(errorCode) {
+        clearInfoQueryTimeout();
+        infoQuery.phase = 'ERROR';
+        infoQuery.pendingRequestId = null;
+        infoQuery.pendingQueryId = null;
+        infoQuery.result = null;
+        infoQuery.displayText = INFO_QUERY_ERROR_TEXT[errorCode]
+            || '查询失败：未知错误';
+    }
+
+    function failPendingInfoQuery(errorCode) {
+        if (infoQuery.phase !== 'PENDING') return;
+        finishInfoQueryError(errorCode);
+    }
 
     function pushNotification(title, message, type = 'info') {
         notificationLogs.value.unshift({
@@ -164,6 +215,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
+            failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
             if (heartbeatTimer) {
@@ -186,6 +238,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
+            failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
     }
@@ -208,6 +261,7 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         isWsConnected.value = false;
         vehicle.connected = false;
+        failPendingInfoQuery('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
 
@@ -438,6 +492,9 @@ export const useGcsStore = defineStore('gcs', () => {
             case 'DATA_LEAK_ALERT':
                 handleLeakAlert(payload);
                 break;
+            case 'DATA_INFO_QUERY_RESULT':
+                handleInfoQueryResult(payload);
+                break;
             case 'state': {
                 const previousState = controlStatus.state;
                 const previousReason = controlStatus.reason;
@@ -555,6 +612,35 @@ export const useGcsStore = defineStore('gcs', () => {
         }
     }
 
+    function handleInfoQueryResult(payload = {}) {
+        if (infoQuery.phase !== 'PENDING') return;
+        if (payload.request_id !== infoQuery.pendingRequestId) return;
+        if (payload.query_id !== infoQuery.pendingQueryId) return;
+
+        if (!payload.success) {
+            finishInfoQueryError(payload.error?.code);
+            return;
+        }
+
+        const formatter = INFO_QUERY_FORMATTERS[payload.query_id];
+        if (!formatter) {
+            finishInfoQueryError('INVALID_RESULT');
+            return;
+        }
+
+        try {
+            const displayText = formatter(payload.data);
+            clearInfoQueryTimeout();
+            infoQuery.phase = 'SUCCESS';
+            infoQuery.pendingRequestId = null;
+            infoQuery.pendingQueryId = null;
+            infoQuery.result = payload.data;
+            infoQuery.displayText = displayText;
+        } catch (error) {
+            finishInfoQueryError(error?.message || 'INVALID_RESULT');
+        }
+    }
+
     function processDownloadedMission(items) {
         if (!items) { // 允许空任务
             mission.plannedWaypoints = [];
@@ -613,6 +699,37 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         socket.send(JSON.stringify(packet));
         return requestId;
+    }
+
+    function requestInformationQuery(queryId = infoQuery.selectedId) {
+        if (infoQuery.phase === 'PENDING') return false;
+        if (!isWsConnected.value) {
+            infoQuery.phase = 'ERROR';
+            infoQuery.result = null;
+            infoQuery.displayText = INFO_QUERY_ERROR_TEXT.BACKEND_DISCONNECTED;
+            return false;
+        }
+        if (!INFO_QUERY_FORMATTERS[queryId]) {
+            infoQuery.phase = 'ERROR';
+            infoQuery.result = null;
+            infoQuery.displayText = INFO_QUERY_ERROR_TEXT.UNSUPPORTED_QUERY;
+            return false;
+        }
+
+        const requestId = sendPacket('CMD_QUERY_INFO', {query_id: queryId});
+        if (!requestId) return false;
+
+        clearInfoQueryTimeout();
+        infoQuery.phase = 'PENDING';
+        infoQuery.pendingRequestId = requestId;
+        infoQuery.pendingQueryId = queryId;
+        infoQuery.result = null;
+        infoQuery.displayText = '查询中…';
+        infoQueryTimeout = setTimeout(() => {
+            if (infoQuery.pendingRequestId !== requestId) return;
+            finishInfoQueryError('FRONTEND_TIMEOUT');
+        }, INFO_QUERY_TIMEOUT_MS);
+        return true;
     }
 
     function requestLeakReturn() {
@@ -799,6 +916,7 @@ export const useGcsStore = defineStore('gcs', () => {
         notificationLogs,
         controlStatus,
         leakAlert,
+        infoQuery,
         isWsConnected,
         wsUrl,
 
@@ -809,6 +927,7 @@ export const useGcsStore = defineStore('gcs', () => {
         requestLocked,
         sendManualControl,
         requestLeakReturn,
+        requestInformationQuery,
         startLeakAlertWatchdog,
         stopLeakAlertWatchdog,
         pushNotification,

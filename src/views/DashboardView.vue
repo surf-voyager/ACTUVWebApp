@@ -31,7 +31,51 @@
           </div>
         </section>
 
-        <!-- 2. 特种混合器 -->
+        <!-- 2. 信息查询 -->
+        <section class="panel-section">
+          <div class="section-header">
+            <el-icon>
+              <Search/>
+            </el-icon>
+            <span>信息查询</span>
+          </div>
+          <div class="info-query-box">
+            <div class="info-query-controls">
+              <el-select
+                  v-model="infoQuery.selectedId"
+                  class="info-query-select"
+                  :disabled="infoQuery.phase === 'PENDING'"
+                  aria-label="查询项目"
+              >
+                <el-option
+                    v-for="option in infoQueryOptions"
+                    :key="option.id"
+                    :label="option.label"
+                    :value="option.id"
+                />
+              </el-select>
+              <el-button
+                  type="primary"
+                  class="info-query-button"
+                  :loading="infoQuery.phase === 'PENDING'"
+                  :disabled="!isWsConnected || infoQuery.phase === 'PENDING'"
+                  @click="handleInfoQuery"
+              >
+                查询
+              </el-button>
+            </div>
+            <div
+                class="info-query-result"
+                :class="`is-${infoQuery.phase.toLowerCase()}`"
+                role="status"
+                aria-live="polite"
+            >
+              {{ infoQuery.displayText }}
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 特种混合器 -->
         <section class="panel-section">
           <div class="section-header">
             <el-icon>
@@ -435,6 +479,7 @@ import {
   Link,
   Loading,
   Menu,
+  Search,
   Setting,
   SwitchButton,
   Tools,
@@ -444,7 +489,21 @@ import {
 import {ElMessageBox} from 'element-plus';
 
 const store = useGcsStore();
-const {vehicle, sysLogs, notificationLogs, mission, mapTriggers, isWsConnected, wsUrl, controlStatus} = storeToRefs(store);
+const {
+  vehicle,
+  sysLogs,
+  notificationLogs,
+  mission,
+  mapTriggers,
+  isWsConnected,
+  wsUrl,
+  controlStatus,
+  infoQuery
+} = storeToRefs(store);
+
+const infoQueryOptions = [
+  {id: 'PX4_POWER_VOLTAGE', label: '飞控供电电压'}
+];
 
 // --- 状态变量 ---
 const missionState = ref('EXECUTING');
@@ -469,6 +528,10 @@ const confirmWsChange = () => {
   store.changeWsUrl(wsDialog.value.newAddress);
   wsDialog.value.visible = false;
   store.pushNotification('系统消息', '正在更新连接地址...', 'success');
+};
+
+const handleInfoQuery = () => {
+  store.requestInformationQuery(infoQuery.value.selectedId);
 };
 
 // --- 自动重连逻辑 ---
@@ -895,6 +958,59 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.04);
   padding: 10px;
   border-radius: 10px;
+}
+
+.info-query-box {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 10px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-query-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.info-query-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.info-query-button {
+  width: 66px;
+  flex: 0 0 66px;
+}
+
+.info-query-result {
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  color: #aaa;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.info-query-result.is-pending {
+  color: #409EFF;
+  border-color: rgba(64, 158, 255, 0.35);
+}
+
+.info-query-result.is-success {
+  color: #67c23a;
+  border-color: rgba(103, 194, 58, 0.35);
+}
+
+.info-query-result.is-error {
+  color: #f56c6c;
+  border-color: rgba(245, 108, 108, 0.35);
 }
 
 .threshold-container {
