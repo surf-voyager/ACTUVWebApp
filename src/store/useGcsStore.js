@@ -2,6 +2,27 @@ import {defineStore} from 'pinia'
 import {reactive, ref} from 'vue'
 import {ElMessage, ElNotification, ElMessageBox} from 'element-plus'
 
+const MAVLINK_COORDINATE_SCALE = 10000000;
+
+function normalizePosition(position) {
+    if (!position || position.lat == null || position.lon == null) return null;
+
+    let lat = Number(position.lat);
+    let lng = Number(position.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    // The current backend sends degrees. Legacy MAVLink payloads use degrees * 1e7.
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        lat /= MAVLINK_COORDINATE_SCALE;
+        lng /= MAVLINK_COORDINATE_SCALE;
+    }
+
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+
+    return {lat, lng};
+}
+
 export const useGcsStore = defineStore('gcs', () => {
     // --- 1. 车辆状态 ---
     const vehicle = reactive({
@@ -20,7 +41,7 @@ export const useGcsStore = defineStore('gcs', () => {
         },
         gps: {sats: 0, fix: 'No Fix'},
         attitude: {roll: 0, pitch: 0, yaw: 0},
-        position: {lat: 45.7700000, lng: 126.6700000}, // 默认位置
+        position: {lat: 45.7700000, lng: 126.6700000, valid: false}, // 默认地图位置，不代表实时定位
         home: null, // 新增：HOME点坐标
         velocity: {speed: 0},
         trajectory: [], //  <--- 轨迹
@@ -215,6 +236,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
+            vehicle.position.valid = false;
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
@@ -238,6 +260,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
+            vehicle.position.valid = false;
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
@@ -261,6 +284,7 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         isWsConnected.value = false;
         vehicle.connected = false;
+        vehicle.position.valid = false;
         failPendingInfoQuery('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
@@ -446,19 +470,17 @@ export const useGcsStore = defineStore('gcs', () => {
         leakAlert.lastBackendMessageAt = monotonicNow();
 
         switch (type) {
-            case 'DATA_NAV':
-                if (payload.position && payload.position.lat) {
-                    // 1. 先除以 1e7 (10^7)
-                    let rawLat = payload.position.lat / 10000000;
-                    let rawLon = payload.position.lon / 10000000;
+            case 'DATA_NAV': {
+                const normalizedPosition = normalizePosition(payload.position);
 
-                    // 2. 强制保留 7 位小数，并转为浮点数
-                    // 这一步至关重要：即使原始数据是整数（如 45.7700000），toFixed 也能保证显示 7 位
-                    vehicle.position.lat = parseFloat(rawLat.toFixed(7));
-                    vehicle.position.lng = parseFloat(rawLon.toFixed(7));
+                if (normalizedPosition) {
+                    vehicle.position.lat = normalizedPosition.lat;
+                    vehicle.position.lng = normalizedPosition.lng;
+                    vehicle.position.valid = true;
+                    vehicle.trajectory.push([normalizedPosition.lat, normalizedPosition.lng]);
 
-                    // 轨迹数据存入
-                    vehicle.trajectory.push([vehicle.position.lat, vehicle.position.lng]);
+                } else {
+                    vehicle.position.valid = false;
                 }
 
                 if (payload.attitude) {
@@ -472,9 +494,11 @@ export const useGcsStore = defineStore('gcs', () => {
                     vehicle.velocity.speed = payload.velocity.ground_speed_m_s;
                 }
                 break;
+            }
 
             case 'DATA_STATUS':
                 vehicle.connected = payload.is_connected;
+                if (!vehicle.connected) vehicle.position.valid = false;
                 vehicle.armed = payload.is_armed;
                 vehicle.mode = payload.flight_mode;
                 // 修改：直接赋值新的电池对象

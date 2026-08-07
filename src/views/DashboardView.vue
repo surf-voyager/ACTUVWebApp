@@ -224,11 +224,31 @@
     <!-- 顶部数据展示 HUD -->
     <div class="hud-top-bar display-only" @wheel="handleHudScroll">
       <div class="telemetry-group">
-        <div class="telemetry-item">
+        <div class="telemetry-item location-item">
           <span class="label">卫星定位</span>
-          <div class="val-group">
-            <span class="value">{{ vehicle.gps.sats ?? 0 }}<small>颗</small></span>
-            <div class="sub-label-wrap"><span class="sub-label">{{ vehicle.gps.fix }}</span></div>
+          <div class="location-content">
+            <div class="gps-summary">
+              <span class="value gps-count">{{ satelliteCount }}<small>颗</small></span>
+              <span class="gps-fix-badge" :class="`fix-${gpsFixStatus.level}`">{{ gpsFixStatus.label }}</span>
+            </div>
+            <div class="coordinate-list">
+              <div class="coordinate-row">
+                <span class="coordinate-label">纬度</span>
+                <template v-if="hasValidPosition">
+                  <span class="coordinate-value">{{ formattedLatitude }}</span>
+                  <small class="coordinate-suffix">° N</small>
+                </template>
+                <span v-else class="coordinate-placeholder">--</span>
+              </div>
+              <div class="coordinate-row">
+                <span class="coordinate-label">经度</span>
+                <template v-if="hasValidPosition">
+                  <span class="coordinate-value">{{ formattedLongitude }}</span>
+                  <small class="coordinate-suffix">° E</small>
+                </template>
+                <span v-else class="coordinate-placeholder">--</span>
+              </div>
+            </div>
           </div>
         </div>
         <div class="divider"></div>
@@ -284,14 +304,6 @@
                 >{{ formatOneDecimal(vehicle.attitude.pitch) }}°</span>
               </span>
             </div>
-          </div>
-        </div>
-        <div class="divider"></div>
-        <div class="telemetry-item position-item">
-          <span class="label">当前位置</span>
-          <div class="coords">
-            <span>{{ (vehicle.position.lat ?? 0).toFixed(7) }} N</span>
-            <span>{{ (vehicle.position.lng ?? 0).toFixed(7) }} E</span>
           </div>
         </div>
       </div>
@@ -563,6 +575,52 @@ watch(() => mapTriggers.value.gotoTargetCandidate, (newTarget) => {
 }, {deep: true});
 
 // --- 辅助计算 ---
+const GPS_FIX_DISPLAY = Object.freeze({
+  NO_GPS: {label: '未定位', level: 'bad', hasFix: false},
+  NO_FIX: {label: '未定位', level: 'bad', hasFix: false},
+  FIX_2D: {label: '二维定位', level: 'warning', hasFix: true},
+  FIX_3D: {label: '三维定位', level: 'good', hasFix: true},
+  FIX_DGPS: {label: '差分定位', level: 'good', hasFix: true},
+  RTK_FLOAT: {label: 'RTK 浮点', level: 'good', hasFix: true},
+  RTK_FIXED: {label: 'RTK 固定', level: 'good', hasFix: true},
+  UNKNOWN: {label: '未知定位', level: 'bad', hasFix: false}
+});
+
+const normalizeGpsFixKey = (value) => {
+  const normalized = String(value ?? '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return normalized.split('.').pop() || 'UNKNOWN';
+};
+
+const gpsFixStatus = computed(() => {
+  const key = normalizeGpsFixKey(vehicle.value.gps.fix);
+  return GPS_FIX_DISPLAY[key] || GPS_FIX_DISPLAY.UNKNOWN;
+});
+
+const satelliteCount = computed(() => {
+  const count = Number(vehicle.value.gps.sats);
+  return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+});
+
+const hasValidPosition = computed(() => {
+  const lat = Number(vehicle.value.position.lat);
+  const lng = Number(vehicle.value.position.lng);
+  return vehicle.value.connected
+      && gpsFixStatus.value.hasFix
+      && vehicle.value.position.valid === true
+      && Number.isFinite(lat)
+      && Number.isFinite(lng)
+      && Math.abs(lat) <= 90
+      && Math.abs(lng) <= 180;
+});
+
+const formatCoordinate = (value) => {
+  const coordinate = Number(value);
+  return Number.isFinite(coordinate) ? coordinate.toFixed(6) : '--';
+};
+
+const formattedLatitude = computed(() => formatCoordinate(vehicle.value.position.lat));
+const formattedLongitude = computed(() => formatCoordinate(vehicle.value.position.lng));
+
 const toFiniteNumber = (value) => {
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue : 0;
@@ -1226,6 +1284,105 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.location-item {
+  width: 270px;
+  min-width: 270px;
+  gap: 5px;
+}
+
+.location-content {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 16px;
+}
+
+.gps-summary {
+  min-width: 0;
+  padding-right: 14px;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.gps-count {
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.gps-fix-badge {
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.gps-fix-badge.fix-good {
+  color: #67c23a;
+  background: rgba(103, 194, 58, 0.12);
+}
+
+.gps-fix-badge.fix-warning {
+  color: #e6a23c;
+  background: rgba(230, 162, 60, 0.12);
+}
+
+.gps-fix-badge.fix-bad {
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.12);
+}
+
+.coordinate-list {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.coordinate-row {
+  display: grid;
+  grid-template-columns: 28px minmax(98px, auto) auto;
+  align-items: baseline;
+  justify-content: start;
+  column-gap: 4px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.coordinate-label {
+  color: #888;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.coordinate-value {
+  color: #409EFF;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+}
+
+.coordinate-suffix {
+  margin-left: 0 !important;
+  color: #aaa;
+  font-size: 11px !important;
+  opacity: 0.6;
+}
+
+.coordinate-placeholder {
+  grid-column: 2 / 4;
+  color: rgba(255, 255, 255, 0.35);
+  font-family: 'Roboto Mono', monospace;
+  font-size: 18px;
+  font-weight: 700;
+}
+
 .motion-item {
   width: 170px;
   min-width: 170px;
@@ -1312,16 +1469,6 @@ onUnmounted(() => {
   font-weight: 900;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
   white-space: nowrap;
-}
-
-.coords {
-  font-family: monospace;
-  font-size: 12px;
-  font-weight: bold;
-  color: #409EFF;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
 }
 
 .divider {
