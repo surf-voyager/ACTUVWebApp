@@ -196,7 +196,7 @@
             <div v-if="notificationLogs.length === 0" class="empty-log">暂无系统消息</div>
             <div v-for="msg in notificationLogs" :key="msg.id" class="log-line-flat" :class="msg.type">
               <span class="log-time">{{ msg.time }}</span>
-              <span class="log-text">【{{ msg.title }}】{{ msg.message }}</span>
+              <span class="log-text">[{{ msg.title }}]{{ msg.message }}</span>
             </div>
           </div>
         </section>
@@ -1139,13 +1139,21 @@ onUnmounted(() => {
 .log-line-flat {
   margin-bottom: 4px;
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 0;
   line-height: 1.3;
 }
 
 .log-time {
   color: #555;
   white-space: nowrap;
+  width: 100%;
+  text-align: center;
+}
+
+.log-text {
+  width: 100%;
+  text-align: left;
 }
 
 .log-error {
