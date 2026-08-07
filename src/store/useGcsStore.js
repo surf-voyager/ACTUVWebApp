@@ -3,9 +3,11 @@ import {reactive, ref} from 'vue'
 import {ElMessage, ElNotification, ElMessageBox} from 'element-plus'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
+const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
 
 function normalizePosition(position) {
-    if (!position || position.lat == null || position.lon == null) return null;
+    if (!position || position.valid !== true || !POSITION_SOURCES.has(position.source)) return null;
+    if (position.lat == null || position.lon == null) return null;
 
     let lat = Number(position.lat);
     let lng = Number(position.lon);
@@ -20,7 +22,13 @@ function normalizePosition(position) {
 
     if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
 
-    return {lat, lng};
+    return {
+        lat,
+        lng,
+        source: position.source,
+        reason: position.reason ?? null,
+        ekfGlobalValid: position.ekf_global_valid === true,
+    };
 }
 
 export const useGcsStore = defineStore('gcs', () => {
@@ -40,8 +48,17 @@ export const useGcsStore = defineStore('gcs', () => {
             is_low_battery_rtl_triggered: false  // 低电量返航状态
         },
         gps: {sats: 0, fix: 'No Fix'},
+        health: {is_global_position_ok: false, is_home_position_ok: false, is_armable: false},
         attitude: {roll: 0, pitch: 0, yaw: 0},
         position: {lat: 45.7700000, lng: 126.6700000, valid: false}, // 默认地图位置，不代表实时定位
+        displayPosition: {
+            lat: null,
+            lng: null,
+            valid: false,
+            source: 'none',
+            reason: 'NOT_CONNECTED',
+            ekfGlobalValid: false,
+        },
         home: null, // 新增：HOME点坐标
         velocity: {speed: 0},
         trajectory: [], //  <--- 轨迹
@@ -236,7 +253,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
-            vehicle.position.valid = false;
+            clearLivePosition('BACKEND_DISCONNECTED');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
@@ -260,7 +277,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
-            vehicle.position.valid = false;
+            clearLivePosition('BACKEND_DISCONNECTED');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
@@ -284,7 +301,7 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         isWsConnected.value = false;
         vehicle.connected = false;
-        vehicle.position.valid = false;
+        clearLivePosition('BACKEND_DISCONNECTED');
         failPendingInfoQuery('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
@@ -465,6 +482,18 @@ export const useGcsStore = defineStore('gcs', () => {
 
 
     // --- 消息分发处理 ---
+    function clearLivePosition(reason = 'POSITION_UNAVAILABLE') {
+        Object.assign(vehicle.displayPosition, {
+            lat: null,
+            lng: null,
+            valid: false,
+            source: 'none',
+            reason,
+            ekfGlobalValid: false,
+        });
+        vehicle.position.valid = false;
+    }
+
     function handleIncomingMessage(msg) {
         const {type, payload} = msg;
         leakAlert.lastBackendMessageAt = monotonicNow();
@@ -474,13 +503,18 @@ export const useGcsStore = defineStore('gcs', () => {
                 const normalizedPosition = normalizePosition(payload.position);
 
                 if (normalizedPosition) {
-                    vehicle.position.lat = normalizedPosition.lat;
-                    vehicle.position.lng = normalizedPosition.lng;
-                    vehicle.position.valid = true;
-                    vehicle.trajectory.push([normalizedPosition.lat, normalizedPosition.lng]);
+                    Object.assign(vehicle.displayPosition, normalizedPosition, {valid: true});
 
+                    if (normalizedPosition.source === 'ekf') {
+                        vehicle.position.lat = normalizedPosition.lat;
+                        vehicle.position.lng = normalizedPosition.lng;
+                        vehicle.position.valid = true;
+                        vehicle.trajectory.push([normalizedPosition.lat, normalizedPosition.lng]);
+                    } else {
+                        vehicle.position.valid = false;
+                    }
                 } else {
-                    vehicle.position.valid = false;
+                    clearLivePosition(payload.position?.reason);
                 }
 
                 if (payload.attitude) {
@@ -498,7 +532,7 @@ export const useGcsStore = defineStore('gcs', () => {
 
             case 'DATA_STATUS':
                 vehicle.connected = payload.is_connected;
-                if (!vehicle.connected) vehicle.position.valid = false;
+                if (!vehicle.connected) clearLivePosition('PX4_DISCONNECTED');
                 vehicle.armed = payload.is_armed;
                 vehicle.mode = payload.flight_mode;
                 // 修改：直接赋值新的电池对象
@@ -506,6 +540,7 @@ export const useGcsStore = defineStore('gcs', () => {
                     Object.assign(vehicle.battery, payload.battery);
                 }
                 if (payload.gps) vehicle.gps = {sats: payload.gps.sat_count, fix: payload.gps.fix_type};
+                if (payload.health) Object.assign(vehicle.health, payload.health);
                 if (payload.home && payload.home.lat && payload.home.lon) {
                     vehicle.home = payload.home;
                 }

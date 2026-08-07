@@ -29,6 +29,16 @@ import { useRoute } from 'vue-router';
 
 const store = useGcsStore();
 const { vehicle, mapTriggers, plannerMode, areaPoints, mission } = storeToRefs(store);
+
+const hasValidEkfPosition = (position) => {
+  const lat = Number(position?.lat);
+  const lng = Number(position?.lng);
+  return position?.valid === true
+      && Number.isFinite(lat)
+      && Number.isFinite(lng)
+      && Math.abs(lat) <= 90
+      && Math.abs(lng) <= 180;
+};
 const route = useRoute();
 
 // --- 变量定义 ---
@@ -160,14 +170,16 @@ const initBoat = () => {
     iconSize: [48, 48],
     iconAnchor: [24, 24],
   });
-  const startLat = vehicle.value.position.lat || 45.99;
-  const startLng = vehicle.value.position.lng || 126.67;
+  const hasInitialPosition = hasValidEkfPosition(vehicle.value.position);
+  const startLat = hasInitialPosition ? Number(vehicle.value.position.lat) : 45.99;
+  const startLng = hasInitialPosition ? Number(vehicle.value.position.lng) : 126.67;
   boatMarker = L.marker([startLat, startLng], {
     icon: boatIcon,
     rotationAngle: -45,
     rotationOrigin: 'center center',
     zIndexOffset: 2000
   }).addTo(boatLayerGroup);
+  boatMarker.setOpacity(hasInitialPosition ? 1 : 0);
 };
 
 // 新增：初始化HOME点
@@ -363,7 +375,7 @@ const saveCurrentArea = () => {
 const focusBoat = () => {
   if (!map || !vehicle.value.position) return;
   const { lat, lng } = vehicle.value.position;
-  if (lat && lng) {
+  if (hasValidEkfPosition(vehicle.value.position)) {
     map.flyTo([lat, lng], 18, { animate: true, duration: 1.0 });
   }
 };
@@ -373,8 +385,12 @@ defineExpose({ saveCurrentArea, focusBoat });
 // --- 监听器 ---
 
 watch(() => vehicle.value.position, (newPos) => {
-  if (boatMarker && newPos.lat && newPos.lng) {
+  if (!boatMarker) return;
+  if (hasValidEkfPosition(newPos)) {
     boatMarker.setLatLng([newPos.lat, newPos.lng]);
+    boatMarker.setOpacity(1);
+  } else {
+    boatMarker.setOpacity(0);
   }
 }, { deep: true });
 

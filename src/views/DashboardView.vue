@@ -232,19 +232,20 @@
               <span class="gps-fix-badge" :class="`fix-${gpsFixStatus.level}`">{{ gpsFixStatus.label }}</span>
             </div>
             <div class="coordinate-list">
+              <span class="position-source-badge" :class="positionSourceClass">{{ positionSourceStatus.label }}</span>
               <div class="coordinate-row">
                 <span class="coordinate-label">纬度</span>
                 <template v-if="hasValidPosition">
-                  <span class="coordinate-value">{{ formattedLatitude }}</span>
-                  <small class="coordinate-suffix">° N</small>
+                  <span class="coordinate-value" :class="positionSourceClass">{{ formattedLatitude }}</span>
+                  <small class="coordinate-suffix">{{ latitudeSuffix }}</small>
                 </template>
                 <span v-else class="coordinate-placeholder">--</span>
               </div>
               <div class="coordinate-row">
                 <span class="coordinate-label">经度</span>
                 <template v-if="hasValidPosition">
-                  <span class="coordinate-value">{{ formattedLongitude }}</span>
-                  <small class="coordinate-suffix">° E</small>
+                  <span class="coordinate-value" :class="positionSourceClass">{{ formattedLongitude }}</span>
+                  <small class="coordinate-suffix">{{ longitudeSuffix }}</small>
                 </template>
                 <span v-else class="coordinate-placeholder">--</span>
               </div>
@@ -601,12 +602,25 @@ const satelliteCount = computed(() => {
   return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 });
 
+const POSITION_SOURCE_DISPLAY = Object.freeze({
+  ekf: {label: 'EKF 全局位置', className: 'source-ekf'},
+  raw_gps: {label: '原始 GPS · EKF无效', className: 'source-raw'},
+  none: {label: '未定位', className: 'source-none'}
+});
+
+const positionSourceStatus = computed(() => {
+  const source = vehicle.value.displayPosition.source;
+  return POSITION_SOURCE_DISPLAY[source] || POSITION_SOURCE_DISPLAY.none;
+});
+
+const positionSourceClass = computed(() => positionSourceStatus.value.className);
+
 const hasValidPosition = computed(() => {
-  const lat = Number(vehicle.value.position.lat);
-  const lng = Number(vehicle.value.position.lng);
+  const lat = Number(vehicle.value.displayPosition.lat);
+  const lng = Number(vehicle.value.displayPosition.lng);
   return vehicle.value.connected
-      && gpsFixStatus.value.hasFix
-      && vehicle.value.position.valid === true
+      && vehicle.value.displayPosition.valid === true
+      && ['ekf', 'raw_gps'].includes(vehicle.value.displayPosition.source)
       && Number.isFinite(lat)
       && Number.isFinite(lng)
       && Math.abs(lat) <= 90
@@ -615,11 +629,13 @@ const hasValidPosition = computed(() => {
 
 const formatCoordinate = (value) => {
   const coordinate = Number(value);
-  return Number.isFinite(coordinate) ? coordinate.toFixed(6) : '--';
+  return Number.isFinite(coordinate) ? Math.abs(coordinate).toFixed(6) : '--';
 };
 
-const formattedLatitude = computed(() => formatCoordinate(vehicle.value.position.lat));
-const formattedLongitude = computed(() => formatCoordinate(vehicle.value.position.lng));
+const formattedLatitude = computed(() => formatCoordinate(vehicle.value.displayPosition.lat));
+const formattedLongitude = computed(() => formatCoordinate(vehicle.value.displayPosition.lng));
+const latitudeSuffix = computed(() => Number(vehicle.value.displayPosition.lat) < 0 ? '° S' : '° N');
+const longitudeSuffix = computed(() => Number(vehicle.value.displayPosition.lng) < 0 ? '° W' : '° E');
 
 const toFiniteNumber = (value) => {
   const numericValue = Number(value);
@@ -1285,8 +1301,8 @@ onUnmounted(() => {
 }
 
 .location-item {
-  width: 270px;
-  min-width: 270px;
+  width: 292px;
+  min-width: 292px;
   gap: 5px;
 }
 
@@ -1341,7 +1357,33 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
+}
+
+.position-source-badge {
+  align-self: flex-start;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.position-source-badge.source-ekf {
+  color: #67c23a;
+  background: rgba(103, 194, 58, 0.12);
+}
+
+.position-source-badge.source-raw {
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.12);
+}
+
+.position-source-badge.source-none {
+  color: #909399;
+  background: rgba(144, 147, 153, 0.12);
 }
 
 .coordinate-row {
@@ -1361,11 +1403,18 @@ onUnmounted(() => {
 }
 
 .coordinate-value {
-  color: #409EFF;
   font-family: 'Roboto Mono', monospace;
   font-size: 18px;
   font-weight: 800;
   letter-spacing: -0.4px;
+}
+
+.coordinate-value.source-ekf {
+  color: #67c23a;
+}
+
+.coordinate-value.source-raw {
+  color: #f56c6c;
 }
 
 .coordinate-suffix {
