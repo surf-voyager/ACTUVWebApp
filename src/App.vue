@@ -78,6 +78,7 @@ const audioActivationOptions = {once: true, capture: true};
 
 onMounted(() => {
   store.startLeakAlertWatchdog();
+  store.startPropulsionFeedbackWatchdog();
   store.connectWebSocket();
   window.addEventListener('pointerdown', activateAlarmAudio, audioActivationOptions);
   window.addEventListener('touchstart', activateAlarmAudio, audioActivationOptions);
@@ -86,6 +87,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   store.stopLeakAlertWatchdog();
+  store.stopPropulsionFeedbackWatchdog();
   window.removeEventListener('pointerdown', activateAlarmAudio, true);
   window.removeEventListener('touchstart', activateAlarmAudio, true);
   window.removeEventListener('keydown', activateAlarmAudio, true);

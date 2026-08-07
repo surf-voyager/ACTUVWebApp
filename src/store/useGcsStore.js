@@ -61,6 +61,13 @@ export const useGcsStore = defineStore('gcs', () => {
         },
         home: null, // 新增：HOME点坐标
         velocity: {speed: 0},
+        propulsionFeedback: {
+            leftRear: {ratio: null, valid: false, status: 'not_received'},
+            rightRear: {ratio: null, valid: false, status: 'not_received'},
+            lateral: {ratio: null, valid: false, status: 'not_received'},
+            lastReceivedAt: 0,
+            stale: true
+        },
         trajectory: [], //  <--- 轨迹
         relay_on: false, // <--- 继电器状态
     })
@@ -126,6 +133,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const BACKEND_CHANNEL_STALE_MS = 1500;
     const LEAK_ALERT_LINGER_MS = 10000;
     const INFO_QUERY_TIMEOUT_MS = 6000;
+    const PROPULSION_FEEDBACK_STALE_MS = 2000;
     const INFO_QUERY_ERROR_TEXT = {
         INVALID_REQUEST: '查询失败：请求格式错误',
         UNSUPPORTED_QUERY: '查询失败：不支持该查询项目',
@@ -148,9 +156,71 @@ export const useGcsStore = defineStore('gcs', () => {
     let leakWatchdogTimer = null;
     let leakRtlTimeout = null;
     let infoQueryTimeout = null;
+    let propulsionFeedbackWatchdogTimer = null;
     let requestSequence = 0;
 
     const monotonicNow = () => performance.now();
+
+    function resetPropulsionFeedback(status = 'not_received') {
+        for (const channelName of ['leftRear', 'rightRear', 'lateral']) {
+            Object.assign(vehicle.propulsionFeedback[channelName], {
+                ratio: null,
+                valid: false,
+                status
+            });
+        }
+        vehicle.propulsionFeedback.lastReceivedAt = 0;
+        vehicle.propulsionFeedback.stale = true;
+    }
+
+    function normalizePropulsionChannel(channel) {
+        const hasRatio = channel?.ratio !== null && channel?.ratio !== undefined;
+        const ratio = Number(channel?.ratio);
+        const valid = channel?.valid === true && hasRatio && Number.isFinite(ratio);
+        return {
+            ratio: valid ? Math.max(-1, Math.min(1, ratio)) : null,
+            valid,
+            status: String(channel?.status || (valid ? 'ok' : 'invalid'))
+        };
+    }
+
+    function handlePropulsionFeedback(payload = {}) {
+        Object.assign(
+            vehicle.propulsionFeedback.leftRear,
+            normalizePropulsionChannel(payload.left_rear)
+        );
+        Object.assign(
+            vehicle.propulsionFeedback.rightRear,
+            normalizePropulsionChannel(payload.right_rear)
+        );
+        Object.assign(
+            vehicle.propulsionFeedback.lateral,
+            normalizePropulsionChannel(payload.lateral)
+        );
+        vehicle.propulsionFeedback.lastReceivedAt = monotonicNow();
+        vehicle.propulsionFeedback.stale = false;
+    }
+
+    function evaluatePropulsionFeedbackFreshness() {
+        const feedback = vehicle.propulsionFeedback;
+        if (feedback.lastReceivedAt <= 0 || feedback.stale) return;
+        if (monotonicNow() - feedback.lastReceivedAt < PROPULSION_FEEDBACK_STALE_MS) return;
+        resetPropulsionFeedback('frontend_timeout');
+    }
+
+    function startPropulsionFeedbackWatchdog() {
+        if (propulsionFeedbackWatchdogTimer) return;
+        propulsionFeedbackWatchdogTimer = setInterval(
+            evaluatePropulsionFeedbackFreshness,
+            250
+        );
+    }
+
+    function stopPropulsionFeedbackWatchdog() {
+        if (!propulsionFeedbackWatchdogTimer) return;
+        clearInterval(propulsionFeedbackWatchdogTimer);
+        propulsionFeedbackWatchdogTimer = null;
+    }
 
     function clearInfoQueryTimeout() {
         if (infoQueryTimeout) {
@@ -254,6 +324,7 @@ export const useGcsStore = defineStore('gcs', () => {
             isWsConnected.value = false;
             vehicle.connected = false;
             clearLivePosition('BACKEND_DISCONNECTED');
+            resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
@@ -278,6 +349,7 @@ export const useGcsStore = defineStore('gcs', () => {
             isWsConnected.value = false;
             vehicle.connected = false;
             clearLivePosition('BACKEND_DISCONNECTED');
+            resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
@@ -302,6 +374,7 @@ export const useGcsStore = defineStore('gcs', () => {
         isWsConnected.value = false;
         vehicle.connected = false;
         clearLivePosition('BACKEND_DISCONNECTED');
+        resetPropulsionFeedback('backend_disconnected');
         failPendingInfoQuery('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
@@ -547,6 +620,9 @@ export const useGcsStore = defineStore('gcs', () => {
                 if (payload.control_state) {
                     Object.assign(controlStatus, payload.control_state);
                 }
+                break;
+            case 'DATA_PROPULSION_FEEDBACK':
+                handlePropulsionFeedback(payload);
                 break;
             case 'DATA_LEAK_ALERT':
                 handleLeakAlert(payload);
@@ -989,6 +1065,8 @@ export const useGcsStore = defineStore('gcs', () => {
         requestInformationQuery,
         startLeakAlertWatchdog,
         stopLeakAlertWatchdog,
+        startPropulsionFeedbackWatchdog,
+        stopPropulsionFeedbackWatchdog,
         pushNotification,
         updatePlannedMission,
         triggerMapSave,

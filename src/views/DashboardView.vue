@@ -307,6 +307,61 @@
             </div>
           </div>
         </div>
+        <div class="divider"></div>
+        <div class="telemetry-item propulsion-feedback-item">
+          <span class="label">推力反馈</span>
+          <div class="propulsion-feedback-layout">
+            <div
+                class="propulsion-track propulsion-track-vertical"
+                :class="{ 'is-invalid': !vehicle.propulsionFeedback.leftRear.valid }"
+                :title="propulsionFeedbackTitle('左后', vehicle.propulsionFeedback.leftRear)"
+            >
+              <span class="propulsion-zero-line"></span>
+              <span
+                  class="propulsion-fill"
+                  :class="propulsionDirectionClass(vehicle.propulsionFeedback.leftRear)"
+                  :style="propulsionFillStyle(vehicle.propulsionFeedback.leftRear, 'vertical')"
+              ></span>
+            </div>
+
+            <div class="propulsion-feedback-center">
+              <div class="propulsion-rear-values">
+                <span>左后 <strong :class="propulsionDirectionClass(vehicle.propulsionFeedback.leftRear)">{{ formatPropulsionPercent(vehicle.propulsionFeedback.leftRear) }}</strong></span>
+                <span class="propulsion-value-divider">|</span>
+                <span>右后 <strong :class="propulsionDirectionClass(vehicle.propulsionFeedback.rightRear)">{{ formatPropulsionPercent(vehicle.propulsionFeedback.rightRear) }}</strong></span>
+              </div>
+              <div
+                  class="propulsion-track propulsion-track-horizontal"
+                  :class="{ 'is-invalid': !vehicle.propulsionFeedback.lateral.valid }"
+                  :title="propulsionFeedbackTitle('侧推', vehicle.propulsionFeedback.lateral)"
+              >
+                <span class="propulsion-zero-line"></span>
+                <span
+                    class="propulsion-fill"
+                    :class="propulsionDirectionClass(vehicle.propulsionFeedback.lateral)"
+                    :style="propulsionFillStyle(vehicle.propulsionFeedback.lateral, 'horizontal')"
+                ></span>
+              </div>
+              <div class="propulsion-lateral-value">
+                侧推
+                <strong :class="propulsionDirectionClass(vehicle.propulsionFeedback.lateral)">{{ formatPropulsionPercent(vehicle.propulsionFeedback.lateral) }}</strong>
+              </div>
+            </div>
+
+            <div
+                class="propulsion-track propulsion-track-vertical"
+                :class="{ 'is-invalid': !vehicle.propulsionFeedback.rightRear.valid }"
+                :title="propulsionFeedbackTitle('右后', vehicle.propulsionFeedback.rightRear)"
+            >
+              <span class="propulsion-zero-line"></span>
+              <span
+                  class="propulsion-fill"
+                  :class="propulsionDirectionClass(vehicle.propulsionFeedback.rightRear)"
+                  :style="propulsionFillStyle(vehicle.propulsionFeedback.rightRear, 'vertical')"
+              ></span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -656,6 +711,53 @@ const formatHeading = (value) => {
 const isTiltWarning = (value) => {
   const numericValue = Number(value);
   return Number.isFinite(numericValue) && Math.abs(numericValue) > 10;
+};
+
+const PROPULSION_STATUS_LABELS = Object.freeze({
+  waiting: '等待信号',
+  not_received: '等待数据',
+  ambiguous_direction: '方向异常',
+  stuck_high: '信号异常',
+  gpio_unavailable: 'GPIO异常',
+  collector_stale: '采集超时',
+  frontend_timeout: '数据超时',
+  backend_disconnected: '后端断开',
+  invalid: '数据异常'
+});
+
+const formatPropulsionPercent = (channel) => {
+  if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return '--';
+  const percent = Math.round(Math.max(-1, Math.min(1, Number(channel.ratio))) * 100);
+  if (percent === 0) return '0%';
+  return `${percent > 0 ? '+' : ''}${percent}%`;
+};
+
+const propulsionDirectionClass = (channel) => {
+  if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return 'feedback-invalid';
+  const ratio = Number(channel.ratio);
+  if (ratio > 0) return 'feedback-positive';
+  if (ratio < 0) return 'feedback-negative';
+  return 'feedback-neutral';
+};
+
+const propulsionFillStyle = (channel, orientation) => {
+  if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return {};
+  const ratio = Math.max(-1, Math.min(1, Number(channel.ratio)));
+  const extent = `${Math.abs(ratio) * 50}%`;
+  if (orientation === 'vertical') {
+    return ratio >= 0
+        ? {height: extent, bottom: '50%'}
+        : {height: extent, top: '50%'};
+  }
+  return ratio >= 0
+      ? {width: extent, left: '50%'}
+      : {width: extent, right: '50%'};
+};
+
+const propulsionFeedbackTitle = (name, channel) => {
+  if (channel?.valid) return `${name}：${formatPropulsionPercent(channel)}`;
+  const status = PROPULSION_STATUS_LABELS[channel?.status] || '反馈无效';
+  return `${name}：${status}`;
 };
 
 const getBatColor = computed(() => {
@@ -1490,6 +1592,146 @@ onUnmounted(() => {
 .tilt-warning {
   color: #f56c6c !important;
   text-shadow: 0 0 8px rgba(245, 108, 108, 0.45) !important;
+}
+
+.propulsion-feedback-item {
+  width: 220px;
+  min-width: 220px;
+}
+
+.propulsion-feedback-layout {
+  height: 58px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) 10px;
+  align-items: stretch;
+  gap: 9px;
+}
+
+.propulsion-feedback-center {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.propulsion-rear-values,
+.propulsion-lateral-value {
+  color: #888;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.propulsion-rear-values {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.propulsion-rear-values strong,
+.propulsion-lateral-value strong {
+  margin-left: 2px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 11px;
+  transition: color 0.2s ease;
+}
+
+.propulsion-value-divider {
+  color: rgba(255, 255, 255, 0.22);
+}
+
+.propulsion-track {
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.propulsion-track-vertical {
+  width: 10px;
+  height: 58px;
+}
+
+.propulsion-track-horizontal {
+  width: 100%;
+  height: 10px;
+}
+
+.propulsion-zero-line {
+  position: absolute;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.propulsion-track-vertical .propulsion-zero-line {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+}
+
+.propulsion-track-horizontal .propulsion-zero-line {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+}
+
+.propulsion-fill {
+  position: absolute;
+  z-index: 1;
+  transition: width 0.35s ease, height 0.35s ease;
+}
+
+.propulsion-track-vertical .propulsion-fill {
+  left: 0;
+  right: 0;
+}
+
+.propulsion-track-horizontal .propulsion-fill {
+  top: 0;
+  bottom: 0;
+}
+
+.feedback-positive {
+  color: #67c23a !important;
+}
+
+.feedback-negative {
+  color: #f56c6c !important;
+}
+
+.propulsion-fill.feedback-positive {
+  background-color: #67c23a;
+}
+
+.propulsion-fill.feedback-negative {
+  background-color: #f56c6c;
+}
+
+.feedback-neutral {
+  color: #d7dbe0 !important;
+}
+
+.feedback-invalid {
+  color: #777 !important;
+}
+
+.propulsion-track.is-invalid {
+  border-style: dashed;
+  background: repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.03) 0,
+      rgba(255, 255, 255, 0.03) 3px,
+      rgba(255, 255, 255, 0.09) 3px,
+      rgba(255, 255, 255, 0.09) 6px
+  );
 }
 
 .telemetry-item .label {
