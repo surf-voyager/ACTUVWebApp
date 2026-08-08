@@ -29,6 +29,20 @@
               <el-button type="primary" link @click="openWsDialog">更改</el-button>
             </div>
           </div>
+          <div class="connection-box ntrip-connection-box">
+            <div class="status-row">
+              <span class="label">差分定位服务</span>
+              <span :class="['status-dot', ntripStatus.healthy ? 'success' : 'error']"></span>
+            </div>
+            <div class="address-row">
+              <span class="address" :title="ntripEndpoint">{{ ntripEndpoint }}</span>
+              <el-button type="primary" link @click="openNtripDialog">更改</el-button>
+            </div>
+            <div :class="['ntrip-status-reason', ntripStatus.healthy ? 'success' : 'error']"
+                 role="status" aria-live="polite">
+              {{ ntripStatus.reason }}
+            </div>
+          </div>
         </section>
 
         <!-- 2. 信息查询 -->
@@ -481,6 +495,40 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="ntripDialog.visible" title="修改差分定位服务" width="440px" class="hud-dialog"
+               align-center append-to-body>
+      <div class="ntrip-config-form">
+        <div class="ntrip-form-row">
+          <label>主机</label>
+          <el-input v-model="ntripDialog.form.host" placeholder="rtk.ntrip.qxwz.com"/>
+        </div>
+        <div class="ntrip-form-row">
+          <label>端口</label>
+          <el-input v-model.number="ntripDialog.form.port" type="number" min="1" max="65535" placeholder="8002"/>
+        </div>
+        <div class="ntrip-form-row">
+          <label>挂载点</label>
+          <el-input v-model="ntripDialog.form.mountpoint" placeholder="AUTO"/>
+        </div>
+        <div class="ntrip-form-row">
+          <label>用户名</label>
+          <el-input v-model="ntripDialog.form.username" autocomplete="username"/>
+        </div>
+        <div class="ntrip-form-row">
+          <label>密码</label>
+          <el-input v-model="ntripDialog.form.password" type="password" show-password
+                    autocomplete="current-password"/>
+        </div>
+        <div class="ntrip-storage-warning">配置将保存在当前浏览器的 localStorage 中。</div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="ntripDialog.visible = false" class="hud-btn-cancel">取消</el-button>
+          <el-button type="primary" @click="confirmNtripChange" class="hud-btn-confirm">保存并连接</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="gotoDialog.visible" title="目标设定" width="320px" class="hud-dialog" align-center
                append-to-body>
       <div class="follow-form">
@@ -566,7 +614,9 @@ const {
   isWsConnected,
   wsUrl,
   controlStatus,
-  infoQuery
+  infoQuery,
+  ntripConfig,
+  ntripStatus
 } = storeToRefs(store);
 
 const infoQueryOptions = [
@@ -582,6 +632,10 @@ let cooldownTimer = null;
 const gotoDialog = ref({visible: false, target: {lat: 0, lng: 0}, heading: 0});
 const missionStartDialog = ref({visible: false, startIndex: 1});
 const wsDialog = ref({visible: false, newAddress: ''});
+const ntripDialog = ref({
+  visible: false,
+  form: {host: '', port: 8002, mountpoint: '', username: '', password: ''}
+});
 const manualWaypointIndex = ref(1);
 
 // 计算倒序日志
@@ -596,6 +650,30 @@ const confirmWsChange = () => {
   store.changeWsUrl(wsDialog.value.newAddress);
   wsDialog.value.visible = false;
   store.pushNotification('系统消息', '正在更新连接地址...', 'success');
+};
+
+const ntripEndpoint = computed(() => {
+  const host = String(ntripConfig.value.host || '').trim();
+  const mountpoint = String(ntripConfig.value.mountpoint || '').trim().replace(/^\/+/, '');
+  if (!host) return '未配置';
+  return `${host}:${ntripConfig.value.port || '--'}/${mountpoint || '--'}`;
+});
+
+const openNtripDialog = () => {
+  ntripDialog.value.form = {
+    host: ntripConfig.value.host,
+    port: ntripConfig.value.port,
+    mountpoint: ntripConfig.value.mountpoint,
+    username: ntripConfig.value.username,
+    password: ntripConfig.value.password
+  };
+  ntripDialog.value.visible = true;
+};
+
+const confirmNtripChange = () => {
+  if (store.saveNtripConfig(ntripDialog.value.form)) {
+    ntripDialog.value.visible = false;
+  }
 };
 
 const handleInfoQuery = () => {
@@ -1134,6 +1212,25 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.04);
   padding: 10px;
   border-radius: 10px;
+}
+
+.ntrip-connection-box {
+  margin-top: 2px;
+}
+
+.ntrip-status-reason {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.ntrip-status-reason.success {
+  color: #67c23a;
+}
+
+.ntrip-status-reason.error {
+  color: #f56c6c;
 }
 
 .info-query-box {
@@ -2093,6 +2190,32 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid #444;
   color: #999;
+}
+
+.ntrip-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ntrip-form-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.ntrip-form-row label {
+  color: #aaa;
+  font-size: 13px;
+  text-align: right;
+}
+
+.ntrip-storage-warning {
+  padding-left: 74px;
+  color: #e6a23c;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .slide-up-enter-active, .slide-up-leave-active {

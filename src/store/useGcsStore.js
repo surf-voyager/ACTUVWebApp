@@ -1,6 +1,7 @@
 import {defineStore} from 'pinia'
 import {reactive, ref} from 'vue'
 import {ElMessage, ElNotification, ElMessageBox} from 'element-plus'
+import {NtripClient} from '../services/ntripClient'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -128,6 +129,35 @@ export const useGcsStore = defineStore('gcs', () => {
         result: null,
         displayText: '请选择查询项目后点击查询'
     });
+    const defaultNtripConfig = {
+        host: 'rtk.ntrip.qxwz.com',
+        port: 8002,
+        mountpoint: 'AUTO',
+        username: '',
+        password: ''
+    };
+    let savedNtripConfig = {};
+    try {
+        savedNtripConfig = JSON.parse(localStorage.getItem('ntripConfig') || '{}');
+    } catch {
+        savedNtripConfig = {};
+    }
+    const ntripConfig = reactive({...defaultNtripConfig, ...savedNtripConfig});
+    const ntripStatus = reactive({
+        code: 'not_configured',
+        reason: '未登录：请配置账号',
+        healthy: false,
+        forwardPaused: false,
+        transport: '',
+        detail: '',
+        lastValidAt: 0,
+        validFrames: 0,
+        invalidFrames: 0,
+        receivedBytes: 0,
+        forwardedFrames: 0,
+        droppedFrames: 0
+    });
+    let ntripClient = null;
 
     const LEAK_ALERT_STALE_MS = 1000;
     const BACKEND_CHANNEL_STALE_MS = 1500;
@@ -911,6 +941,45 @@ export const useGcsStore = defineStore('gcs', () => {
         return true;
     }
 
+    function startNtripClient() {
+        if (!ntripClient) {
+            ntripClient = new NtripClient({
+                config: ntripConfig,
+                status: ntripStatus,
+                getPosition: () => vehicle.displayPosition,
+                getSatellites: () => vehicle.gps.sats,
+                isBackendReady: () => isWsConnected.value && vehicle.connected,
+                sendRtcmBatch: (batch) => sendSimplePacket('rtcm', batch)
+            });
+        }
+        ntripClient.start();
+    }
+
+    function stopNtripClient() {
+        ntripClient?.stop();
+    }
+
+    function saveNtripConfig(nextConfig) {
+        const normalized = {
+            host: String(nextConfig?.host || '').trim(),
+            port: Number(nextConfig?.port),
+            mountpoint: String(nextConfig?.mountpoint || '').trim().replace(/^\/+/, ''),
+            username: String(nextConfig?.username || ''),
+            password: String(nextConfig?.password || '')
+        };
+        if (!normalized.host || !Number.isInteger(normalized.port)
+            || normalized.port < 1 || normalized.port > 65535
+            || !normalized.mountpoint || !normalized.username || !normalized.password) {
+            pushNotification('差分配置', '请完整填写主机、端口、挂载点、用户名和密码', 'warning');
+            return false;
+        }
+        Object.assign(ntripConfig, normalized);
+        localStorage.setItem('ntripConfig', JSON.stringify(normalized));
+        ntripClient?.configurationChanged();
+        pushNotification('差分配置', '配置已保存，正在等待有效定位并自动登录', 'success');
+        return true;
+    }
+
     function requestManual() {
         return sendSimplePacket('manual');
     }
@@ -1052,6 +1121,8 @@ export const useGcsStore = defineStore('gcs', () => {
         controlStatus,
         leakAlert,
         infoQuery,
+        ntripConfig,
+        ntripStatus,
         isWsConnected,
         wsUrl,
 
@@ -1067,6 +1138,9 @@ export const useGcsStore = defineStore('gcs', () => {
         stopLeakAlertWatchdog,
         startPropulsionFeedbackWatchdog,
         stopPropulsionFeedbackWatchdog,
+        startNtripClient,
+        stopNtripClient,
+        saveNtripConfig,
         pushNotification,
         updatePlannedMission,
         triggerMapSave,

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:ntrip": "node --test test/rtcm3.test.mjs test/ntripProtocol.test.mjs test/ntripBridge.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
