@@ -971,7 +971,7 @@ const propulsionMotionState = computed(() => {
   const isValid = (channel) => channel?.valid && Number.isFinite(Number(channel.ratio));
 
   if (!vehicle.value.connected) return PROPULSION_MOTION_STATES.unknown;
-  if (controlStatus.value.state === 'locked' || !vehicle.value.armed) {
+  if (!vehicle.value.armed) {
     return PROPULSION_MOTION_STATES.stationary;
   }
 
@@ -1024,7 +1024,7 @@ const propulsionMotionState = computed(() => {
 
 const propulsionFeedbackForcedStopped = computed(() => (
     vehicle.value.connected
-    && (controlStatus.value.state === 'locked' || !vehicle.value.armed)
+    && !vehicle.value.armed
 ));
 
 const formatPropulsionPercent = (channel) => {
