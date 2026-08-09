@@ -111,6 +111,17 @@
                 </button>
               </div>
 
+              <div class="action-footer file-action-footer">
+                <button class="hud-btn secondary" @click="handleSaveMissionFile">
+                  <el-icon><Document /></el-icon> 保存任务到文件
+                </button>
+                <button class="hud-btn secondary" @click="handleChooseMissionFile">
+                  <el-icon><FolderOpened /></el-icon> 从文件读取任务
+                </button>
+                <input ref="missionFileInputRef" type="file" class="mission-file-input"
+                       accept=".json,application/json" @change="handleMissionFileSelected">
+              </div>
+
             </div>
           </el-tab-pane>
 
@@ -165,8 +176,23 @@ import { useGcsStore } from '../store/useGcsStore';
 import { storeToRefs } from 'pinia';
 import { ElMessageBox, ElMessage, ElNotification } from 'element-plus';
 import Sortable from 'sortablejs';
-import { Upload, Close, ArrowRight, ArrowLeft, Grid, MapLocation } from '@element-plus/icons-vue';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Close,
+  Document,
+  Download,
+  FolderOpened,
+  Grid,
+  MapLocation,
+  Upload
+} from '@element-plus/icons-vue';
 import * as turf from '@turf/turf';
+import {
+  buildMissionFilename,
+  createMissionFileDocument,
+  parseMissionFileDocument
+} from '../services/missionFile';
 
 const store = useGcsStore();
 const {
@@ -180,7 +206,9 @@ const {
 const isCollapsed = ref(false);
 const activeTab = ref('mission');
 const tableRef = ref(null);
+const missionFileInputRef = ref(null);
 const acceptanceRadiusDraft = ref('');
+const MAX_MISSION_FILE_SIZE_BYTES = 1024 * 1024;
 
 const parsedAcceptanceRadius = computed(() => {
   if (acceptanceRadiusDraft.value === '') return null;
@@ -329,6 +357,85 @@ const handleUpload = () => {
 const handleDownload = () => {
     store.sendPacket("CMD_DOWNLOAD_MISSION", {});
 };
+
+const handleSaveMissionFile = () => {
+  try {
+    const missionDocument = createMissionFileDocument(mission.value);
+    const jsonText = `${JSON.stringify(missionDocument, null, 2)}\n`;
+    const objectUrl = URL.createObjectURL(
+        new Blob([jsonText], {type: 'application/json;charset=utf-8'})
+    );
+    const link = window.document.createElement('a');
+    link.href = objectUrl;
+    link.download = buildMissionFilename();
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    ElMessage.success(`已保存 ${missionDocument.waypoints.length} 个航点`);
+  } catch (error) {
+    ElMessage.error(error?.message || '任务文件保存失败');
+  }
+};
+
+const handleChooseMissionFile = () => {
+  if (!missionFileInputRef.value) return;
+  missionFileInputRef.value.value = '';
+  missionFileInputRef.value.click();
+};
+
+const handleMissionFileSelected = async (event) => {
+  const input = event.target;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  let importedMission;
+  try {
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      throw new Error('请选择 JSON 格式的任务文件');
+    }
+    if (file.size > MAX_MISSION_FILE_SIZE_BYTES) {
+      throw new Error('任务文件不能超过 1 MB');
+    }
+    importedMission = parseMissionFileDocument(await file.text());
+  } catch (error) {
+    input.value = '';
+    ElMessage.error(error?.message || '任务文件读取失败');
+    return;
+  }
+
+  if (mission.value.plannedWaypoints.length > 0) {
+    try {
+      await ElMessageBox.confirm(
+          '读取文件将完整替换当前前端本地任务，尚未保存的修改会丢失。确定继续吗？',
+          '替换当前任务',
+          {
+            confirmButtonText: '确认替换',
+            cancelButtonText: '取消',
+            type: 'warning',
+            customClass: 'hud-message-box'
+          }
+      );
+    } catch (_) {
+      input.value = '';
+      return;
+    }
+  }
+
+  mission.value.defaults.speed = importedMission.defaults.speed;
+  mission.value.defaults.loiter = importedMission.defaults.loiter;
+  mission.value.plannedWaypoints = importedMission.waypoints;
+  mission.value.progress.current = 0;
+  mission.value.progress.total = 0;
+  store.triggerRedraw();
+  input.value = '';
+  ElNotification.success({
+    title: '任务文件读取成功',
+    message: `已载入 ${importedMission.waypoints.length} 个本地航点；如需写入 PX4，请点击“发送任务到飞控”`,
+    position: 'top-right'
+  });
+};
+
 const handleSaveMap = () => store.triggerMapSave();
 
 // --- 区域规划 ---
@@ -473,6 +580,10 @@ function calculateSPath(points, params) {
 .hud-btn { width: 100%; padding: 10px; border: none; border-radius: 4px; color: white; font-weight: 600; cursor: pointer; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .hud-btn.primary { background: #409EFF; }
 .hud-btn.success { background: #67c23a; }
+.hud-btn.secondary { background: #53677d; }
+.hud-btn.secondary:hover { background: #637c96; }
+.file-action-footer { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1); }
+.mission-file-input { display: none; }
 .delete-icon { cursor: pointer; color: #f56c6c; }
 
 /* Tabs */

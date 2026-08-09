@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:ntrip": "node --test test/rtcm3.test.mjs test/ntripProtocol.test.mjs test/ntripBridge.test.mjs",
-    "test:waypoint-radius": "node --test test/waypointAcceptanceRadius.test.mjs"
+    "test:waypoint-radius": "node --test test/waypointAcceptanceRadius.test.mjs",
+    "test:mission-file": "node --test test/missionFile.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
