@@ -1336,7 +1336,7 @@ watch(() => [controlStatus.value.state, controlStatus.value.transitioning], ([st
 
 const handleLeftStick = (vec) => controlState.value.throttle = vec.y;
 const resetLeftStick = () => controlState.value.throttle = 0;
-const handleRightStick = (vec) => controlState.value.steering = -vec.x;
+const handleRightStick = (vec) => controlState.value.steering = vec.x;
 const resetRightStick = () => controlState.value.steering = 0;
 
 onUnmounted(() => {
