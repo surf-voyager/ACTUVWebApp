@@ -327,7 +327,7 @@
           <div class="propulsion-feedback-layout">
             <div
                 class="propulsion-track propulsion-track-vertical"
-                :class="{ 'is-invalid': !vehicle.propulsionFeedback.leftRear.valid }"
+                :class="{ 'is-invalid': !propulsionFeedbackForcedStopped && !vehicle.propulsionFeedback.leftRear.valid }"
                 :title="propulsionFeedbackTitle('左后', vehicle.propulsionFeedback.leftRear)"
             >
               <span class="propulsion-zero-line"></span>
@@ -354,7 +354,7 @@
               </div>
               <div
                   class="propulsion-track propulsion-track-horizontal"
-                  :class="{ 'is-invalid': !vehicle.propulsionFeedback.lateral.valid }"
+                  :class="{ 'is-invalid': !propulsionFeedbackForcedStopped && !vehicle.propulsionFeedback.lateral.valid }"
                   :title="propulsionFeedbackTitle('侧推', vehicle.propulsionFeedback.lateral)"
               >
                 <span class="propulsion-zero-line"></span>
@@ -372,7 +372,7 @@
 
             <div
                 class="propulsion-track propulsion-track-vertical"
-                :class="{ 'is-invalid': !vehicle.propulsionFeedback.rightRear.valid }"
+                :class="{ 'is-invalid': !propulsionFeedbackForcedStopped && !vehicle.propulsionFeedback.rightRear.valid }"
                 :title="propulsionFeedbackTitle('右后', vehicle.propulsionFeedback.rightRear)"
             >
               <span class="propulsion-zero-line"></span>
@@ -645,6 +645,7 @@ const ntripDialog = ref({
   form: {host: '', port: 8002, mountpoint: '', username: '', password: ''}
 });
 const manualWaypointIndex = ref(1);
+const controlState = ref({throttle: 0.0, steering: 0.0});
 
 // 计算倒序日志
 const reversedLogs = computed(() => [...(sysLogs.value || [])].reverse());
@@ -824,20 +825,34 @@ const PROPULSION_MOTION_STATES = Object.freeze({
 
 const propulsionMotionState = computed(() => {
   const feedback = vehicle.value.propulsionFeedback;
-  const channels = [feedback.leftRear, feedback.rightRear, feedback.lateral];
-  const allChannelsValid = channels.every(
-      (channel) => channel?.valid && Number.isFinite(Number(channel.ratio))
-  );
+  const isValid = (channel) => channel?.valid && Number.isFinite(Number(channel.ratio));
 
-  if (!allChannelsValid) return PROPULSION_MOTION_STATES.unknown;
+  if (!vehicle.value.connected) return PROPULSION_MOTION_STATES.unknown;
+  if (controlStatus.value.state === 'locked' || !vehicle.value.armed) {
+    return PROPULSION_MOTION_STATES.stationary;
+  }
 
-  const leftRear = Number(feedback.leftRear.ratio);
-  const rightRear = Number(feedback.rightRear.ratio);
-  const lateral = Number(feedback.lateral.ratio);
-  const forwardComponent = (leftRear + rightRear) / 2;
-  const mainYawComponent = (leftRear - rightRear) / 2;
+  const leftRearValid = isValid(feedback.leftRear);
+  const rightRearValid = isValid(feedback.rightRear);
+  const rearPairValid = leftRearValid && rightRearValid;
+  const lateralValid = isValid(feedback.lateral);
+  const manualInputNeutral = controlStatus.value.state === 'manual'
+      && Math.abs(controlState.value.throttle) <= PROPULSION_INFERENCE_THRESHOLD
+      && Math.abs(controlState.value.steering) <= PROPULSION_INFERENCE_THRESHOLD;
+
+  const leftRear = leftRearValid ? Number(feedback.leftRear.ratio) : 0;
+  const rightRear = rightRearValid ? Number(feedback.rightRear.ratio) : 0;
+  const lateral = lateralValid ? Number(feedback.lateral.ratio) : 0;
+  const forwardComponent = rearPairValid ? (leftRear + rightRear) / 2 : 0;
+  // With both rear channels available, use their differential component.
+  // With only one active rear channel, its signed thrust alone identifies yaw:
+  // left positive/right negative -> right turn, and vice versa.
+  const mainYawComponent = rearPairValid
+      ? (leftRear - rightRear) / 2
+      : leftRear - rightRear;
   const mainYawActive = Math.abs(mainYawComponent) > PROPULSION_INFERENCE_THRESHOLD;
-  const lateralYawActive = Math.abs(lateral) > PROPULSION_INFERENCE_THRESHOLD;
+  const lateralYawActive = lateralValid
+      && Math.abs(lateral) > PROPULSION_INFERENCE_THRESHOLD;
 
   if (mainYawActive && lateralYawActive && Math.sign(mainYawComponent) !== Math.sign(lateral)) {
     return PROPULSION_MOTION_STATES.conflict;
@@ -850,12 +865,27 @@ const propulsionMotionState = computed(() => {
         : PROPULSION_MOTION_STATES.left;
   }
 
-  if (forwardComponent > PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.forward;
-  if (forwardComponent < -PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.reverse;
-  return PROPULSION_MOTION_STATES.stationary;
+  if (rearPairValid) {
+    if (forwardComponent > PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.forward;
+    if (forwardComponent < -PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.reverse;
+    return PROPULSION_MOTION_STATES.stationary;
+  }
+
+  // A stopped feedback line may contain no measurable cycle. In manual mode,
+  // zero user input is therefore the safe stationary fallback when no channel
+  // provides enough evidence for another state.
+  return manualInputNeutral
+      ? PROPULSION_MOTION_STATES.stationary
+      : PROPULSION_MOTION_STATES.unknown;
 });
 
+const propulsionFeedbackForcedStopped = computed(() => (
+    vehicle.value.connected
+    && (controlStatus.value.state === 'locked' || !vehicle.value.armed)
+));
+
 const formatPropulsionPercent = (channel) => {
+  if (propulsionFeedbackForcedStopped.value) return '0%';
   if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return '--';
   const percent = Math.round(Math.max(-1, Math.min(1, Number(channel.ratio))) * 100);
   if (percent === 0) return '0%';
@@ -863,6 +893,7 @@ const formatPropulsionPercent = (channel) => {
 };
 
 const propulsionDirectionClass = (channel) => {
+  if (propulsionFeedbackForcedStopped.value) return 'feedback-neutral';
   if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return 'feedback-invalid';
   const ratio = Number(channel.ratio);
   if (ratio > 0) return 'feedback-positive';
@@ -871,6 +902,11 @@ const propulsionDirectionClass = (channel) => {
 };
 
 const propulsionFillStyle = (channel, orientation) => {
+  if (propulsionFeedbackForcedStopped.value) {
+    return orientation === 'vertical'
+        ? {height: '0%', top: '50%'}
+        : {width: '0%', left: '50%'};
+  }
   if (!channel?.valid || !Number.isFinite(Number(channel.ratio))) return {};
   const ratio = Math.max(-1, Math.min(1, Number(channel.ratio)));
   const extent = `${Math.abs(ratio) * 50}%`;
@@ -885,6 +921,7 @@ const propulsionFillStyle = (channel, orientation) => {
 };
 
 const propulsionFeedbackTitle = (name, channel) => {
+  if (propulsionFeedbackForcedStopped.value) return `${name}：0%（暂停模式）`;
   if (channel?.valid) return `${name}：${formatPropulsionPercent(channel)}`;
   const status = PROPULSION_STATUS_LABELS[channel?.status] || '反馈无效';
   return `${name}：${status}`;
@@ -1116,7 +1153,6 @@ const confirmGoto = () => {
 };
 
 // --- 摇杆逻辑 ---
-const controlState = ref({throttle: 0.0, steering: 0.0});
 let controlLoop = null;
 
 const startManualControlLoop = () => {
