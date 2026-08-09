@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import {once} from 'node:events'
-import {NtripBridgeSession} from '../tools/ntripBridgePlugin.mjs'
+import {NtripBridgeSession, NtripConnectionTestSession} from '../tools/ntripBridgePlugin.mjs'
 import {crc24q} from '../src/services/rtcm3.js'
 
 function makeRtcmFrame() {
@@ -52,3 +52,58 @@ test('Node bridge authenticates, forwards binary data, and sends GGA', async (co
   assert.ok(events.some(({event, payload: status}) => event === 'ntrip:status' && status.code === 'authenticated'))
 })
 
+test('temporary connection test uses the fixed position and requires valid RTCM', async (context) => {
+  const frame = makeRtcmFrame()
+  let requestText = ''
+  const caster = net.createServer((socket) => {
+    socket.once('data', (request) => {
+      requestText = request.toString('ascii')
+      socket.write(Buffer.concat([Buffer.from('ICY 200 OK\r\n', 'ascii'), frame]))
+    })
+  })
+  caster.listen(0, '127.0.0.1')
+  await once(caster, 'listening')
+  context.after(() => caster.close())
+
+  let resultResolve
+  const resultReceived = new Promise((resolve) => { resultResolve = resolve })
+  const client = {
+    send(event, payload) {
+      if (event === 'ntrip:test-status' && payload.code === 'success') resultResolve(payload)
+    },
+  }
+  const session = new NtripConnectionTestSession(client, '', console, () => {}, 1000)
+  context.after(() => session.stop())
+  const {port} = caster.address()
+  session.start({host: '127.0.0.1', port, mountpoint: 'AUTO', username: 'test', password: 'secret'})
+
+  const result = await resultReceived
+  assert.equal(result.code, 'success')
+  assert.equal(result.valid_frames, 1)
+  assert.match(requestText, /4546\.60074,N/)
+  assert.match(requestText, /12640\.46460,E/)
+})
+
+test('temporary connection test rejects an authenticated stream without valid RTCM', async (context) => {
+  const caster = net.createServer((socket) => {
+    socket.once('data', () => socket.write(Buffer.from('ICY 200 OK\r\nnot-rtcm', 'ascii')))
+  })
+  caster.listen(0, '127.0.0.1')
+  await once(caster, 'listening')
+  context.after(() => caster.close())
+
+  let resultResolve
+  const resultReceived = new Promise((resolve) => { resultResolve = resolve })
+  const client = {
+    send(event, payload) {
+      if (event === 'ntrip:test-status' && payload.code === 'no_data') resultResolve(payload)
+    },
+  }
+  const session = new NtripConnectionTestSession(client, '', console, () => {}, 50)
+  context.after(() => session.stop())
+  const {port} = caster.address()
+  session.start({host: '127.0.0.1', port, mountpoint: 'AUTO', username: 'test', password: 'secret'})
+
+  const result = await resultReceived
+  assert.equal(result.code, 'no_data')
+})

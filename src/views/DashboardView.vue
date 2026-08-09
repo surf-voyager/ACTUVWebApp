@@ -504,7 +504,7 @@
     </el-dialog>
 
     <el-dialog v-model="ntripDialog.visible" title="修改差分定位服务" width="440px" class="hud-dialog"
-               align-center append-to-body>
+               align-center append-to-body @closed="resetNtripConnectionTest">
       <div class="ntrip-config-form">
         <div class="ntrip-form-row">
           <label>主机</label>
@@ -532,8 +532,33 @@
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="ntripDialog.visible = false" class="hud-btn-cancel">取消</el-button>
-          <el-button type="primary" @click="confirmNtripChange" class="hud-btn-confirm">保存并连接</el-button>
+          <el-button
+              :type="ntripDialog.test.phase === 'success' ? 'success' : 'primary'"
+              :loading="ntripDialog.test.phase === 'testing'"
+              :disabled="ntripDialog.test.phase === 'testing'"
+              @click="startNtripConnectionTest"
+              class="hud-btn-confirm"
+          >
+            <template v-if="ntripDialog.test.phase === 'success'">
+              <el-icon><CircleCheckFilled/></el-icon>
+              测试通过
+            </template>
+            <template v-else>{{ ntripDialog.test.phase === 'error' ? '重新测试' : '连接测试' }}</template>
+          </el-button>
+          <el-button
+              type="primary"
+              :disabled="ntripDialog.test.phase !== 'success'"
+              @click="confirmNtripChange"
+              class="hud-btn-confirm"
+          >保存并连接</el-button>
         </span>
+        <div
+            v-if="ntripDialog.test.phase !== 'idle'"
+            class="ntrip-test-result"
+            :class="`is-${ntripDialog.test.phase}`"
+            role="status"
+            aria-live="polite"
+        >{{ ntripDialog.test.message }}</div>
       </template>
     </el-dialog>
 
@@ -598,6 +623,7 @@ import {storeToRefs} from 'pinia';
 import VirtualJoystick from '../components/Cockpit/VirtualJoystick.vue';
 import {
   Bell,
+  CircleCheckFilled,
   Document,
   Lightning,
   Link,
@@ -642,7 +668,8 @@ const missionStartDialog = ref({visible: false, startIndex: 1});
 const wsDialog = ref({visible: false, newAddress: ''});
 const ntripDialog = ref({
   visible: false,
-  form: {host: '', port: 8002, mountpoint: '', username: '', password: ''}
+  form: {host: '', port: 8002, mountpoint: '', username: '', password: ''},
+  test: {phase: 'idle', message: '', requestId: null}
 });
 const manualWaypointIndex = ref(1);
 const controlState = ref({throttle: 0.0, steering: 0.0});
@@ -669,6 +696,7 @@ const ntripEndpoint = computed(() => {
 });
 
 const openNtripDialog = () => {
+  resetNtripConnectionTest();
   ntripDialog.value.form = {
     host: ntripConfig.value.host,
     port: ntripConfig.value.port,
@@ -679,7 +707,122 @@ const openNtripDialog = () => {
   ntripDialog.value.visible = true;
 };
 
+const NTRIP_TEST_ERROR_MESSAGES = Object.freeze({
+  invalid_config: '配置无效，请完整填写连接信息',
+  auth_failed: '认证失败，请检查用户名、密码和挂载点',
+  network_error: '无法连接差分服务',
+  bridge_error: '本地差分桥接服务不可用',
+  no_data: '已登录，但 10 秒内未收到有效 RTCM 数据',
+  test_timeout: '连接测试超时'
+});
+const NTRIP_TEST_UI_TIMEOUT_MS = 11_000;
+let ntripTestUiTimeout = null;
+
+const clearNtripTestUiTimeout = () => {
+  if (ntripTestUiTimeout) clearTimeout(ntripTestUiTimeout);
+  ntripTestUiTimeout = null;
+};
+
+const stopNtripConnectionTest = () => {
+  clearNtripTestUiTimeout();
+  const requestId = ntripDialog.value.test.requestId;
+  if (requestId && import.meta.hot) {
+    import.meta.hot.send('ntrip:test-stop', {request_id: requestId});
+  }
+};
+
+function resetNtripConnectionTest() {
+  stopNtripConnectionTest();
+  ntripDialog.value.test = {phase: 'idle', message: '', requestId: null};
+}
+
+const normalizeNtripTestConfig = (input) => ({
+  host: String(input?.host || '').trim(),
+  port: Number(input?.port),
+  mountpoint: String(input?.mountpoint || '').trim().replace(/^\/+/, ''),
+  username: String(input?.username || ''),
+  password: String(input?.password || '')
+});
+
+const startNtripConnectionTest = () => {
+  const config = normalizeNtripTestConfig(ntripDialog.value.form);
+  if (!config.host || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535
+      || !config.mountpoint || !config.username || !config.password) {
+    ntripDialog.value.test = {
+      phase: 'error',
+      message: NTRIP_TEST_ERROR_MESSAGES.invalid_config,
+      requestId: null
+    };
+    return;
+  }
+  if (!import.meta.hot) {
+    ntripDialog.value.test = {
+      phase: 'error',
+      message: '本地差分桥接服务仅随 npm run dev 提供',
+      requestId: null
+    };
+    return;
+  }
+
+  stopNtripConnectionTest();
+  const requestId = `ntrip-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  ntripDialog.value.test = {
+    phase: 'testing',
+    message: '正在连接差分服务…',
+    requestId
+  };
+  import.meta.hot.send('ntrip:test', {request_id: requestId, config});
+  ntripTestUiTimeout = setTimeout(() => {
+    if (ntripDialog.value.test.phase !== 'testing'
+        || ntripDialog.value.test.requestId !== requestId) return;
+    import.meta.hot.send('ntrip:test-stop', {request_id: requestId});
+    ntripDialog.value.test = {
+      phase: 'error',
+      message: '连接测试超时：本地差分桥接服务未响应',
+      requestId: null
+    };
+    ntripTestUiTimeout = null;
+  }, NTRIP_TEST_UI_TIMEOUT_MS);
+};
+
+const handleNtripTestStatus = (payload = {}) => {
+  if (String(payload.request_id || '') !== ntripDialog.value.test.requestId) return;
+  const code = String(payload.code || 'bridge_error');
+  if (code === 'connecting') {
+    ntripDialog.value.test.message = '正在连接差分服务…';
+    return;
+  }
+  if (code === 'authenticated') {
+    ntripDialog.value.test.message = '登录成功，正在等待有效 RTCM 数据…';
+    return;
+  }
+  if (code === 'success') {
+    clearNtripTestUiTimeout();
+    ntripDialog.value.test = {
+      phase: 'success',
+      message: '连接成功，已收到有效 RTCM 数据',
+      requestId: null
+    };
+    return;
+  }
+  clearNtripTestUiTimeout();
+  ntripDialog.value.test = {
+    phase: 'error',
+    message: NTRIP_TEST_ERROR_MESSAGES[code] || String(payload.message || '连接测试失败'),
+    requestId: null
+  };
+};
+
+if (import.meta.hot) import.meta.hot.on('ntrip:test-status', handleNtripTestStatus);
+
+watch(() => ntripDialog.value.form, () => {
+  if (ntripDialog.value.visible && ntripDialog.value.test.phase !== 'idle') {
+    resetNtripConnectionTest();
+  }
+}, {deep: true});
+
 const confirmNtripChange = () => {
+  if (ntripDialog.value.test.phase !== 'success') return;
   if (store.saveNtripConfig(ntripDialog.value.form)) {
     ntripDialog.value.visible = false;
   }
@@ -1185,6 +1328,8 @@ const handleRightStick = (vec) => controlState.value.steering = -vec.x;
 const resetRightStick = () => controlState.value.steering = 0;
 
 onUnmounted(() => {
+  resetNtripConnectionTest();
+  if (import.meta.hot) import.meta.hot.off('ntrip:test-status', handleNtripTestStatus);
   stopManualControlLoop();
   if (reconnectTimer) clearInterval(reconnectTimer);
   if (cooldownTimer) clearInterval(cooldownTimer);
@@ -2297,6 +2442,10 @@ onUnmounted(() => {
   font-weight: bold;
 }
 
+.hud-btn-confirm.el-button--success {
+  background: #67c23a;
+}
+
 .hud-btn-cancel {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid #444;
@@ -2327,6 +2476,26 @@ onUnmounted(() => {
   color: #e6a23c;
   font-size: 11px;
   line-height: 1.4;
+}
+
+.ntrip-test-result {
+  min-height: 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.ntrip-test-result.is-testing {
+  color: #409eff;
+}
+
+.ntrip-test-result.is-success {
+  color: #67c23a;
+}
+
+.ntrip-test-result.is-error {
+  color: #f56c6c;
 }
 
 .slide-up-enter-active, .slide-up-leave-active {

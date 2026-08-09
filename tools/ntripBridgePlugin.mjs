@@ -10,12 +10,19 @@ import {
   parseNtripResponseHeader,
   statusIsSuccessful,
 } from './ntripProtocol.mjs'
+import { Rtcm3StreamParser } from '../src/services/rtcm3.js'
 
 const CONNECT_TIMEOUT_MS = 10_000
 const GGA_INTERVAL_MS = 5_000
 const RECONNECT_DELAYS_MS = [3_000, 5_000, 10_000, 20_000, 30_000]
 const MAX_HEADER_BYTES = 65_536
 const MAX_CHUNK_BYTES = 65_536
+const NTRIP_TEST_TIMEOUT_MS = 10_000
+const NTRIP_TEST_POSITION = Object.freeze({
+  latitude: 45.776679,
+  longitude: 126.674410,
+  satellites: 12,
+})
 
 function isWsl() {
   return process.platform === 'linux' && /microsoft/i.test(os.release())
@@ -267,6 +274,91 @@ export class NtripBridgeSession {
   }
 }
 
+export class NtripConnectionTestSession {
+  constructor(client, helperPath, logger, onFinish = () => {}, timeoutMs = NTRIP_TEST_TIMEOUT_MS) {
+    this.client = client
+    this.onFinish = onFinish
+    this.timeoutMs = timeoutMs
+    this.parser = new Rtcm3StreamParser()
+    this.authenticated = false
+    this.finished = false
+    this.timeout = null
+    this.bridge = new NtripBridgeSession({
+      send: (event, payload) => this.handleBridgeEvent(event, payload),
+    }, helperPath, logger)
+  }
+
+  start(config) {
+    this.timeout = setTimeout(() => {
+      this.finish({
+        code: this.authenticated ? 'no_data' : 'test_timeout',
+        message: this.authenticated
+          ? '已登录，但 10 秒内未收到有效 RTCM 数据'
+          : '10 秒内未能连接差分服务',
+      })
+    }, this.timeoutMs)
+    this.bridge.setConfig(config)
+    if (!this.finished) this.bridge.setPosition(NTRIP_TEST_POSITION)
+  }
+
+  handleBridgeEvent(event, payload = {}) {
+    if (this.finished) return
+    if (event === 'ntrip:data') {
+      let chunk
+      try {
+        chunk = Uint8Array.from(Buffer.from(String(payload.data || ''), 'base64'))
+      } catch {
+        return
+      }
+      const frames = this.parser.feed(chunk)
+      if (frames.length > 0) {
+        this.finish({
+          code: 'success',
+          message: '连接成功，已收到有效 RTCM 数据',
+          transport: payload.transport || '',
+          valid_frames: frames.length,
+        })
+      }
+      return
+    }
+    if (event !== 'ntrip:status') return
+
+    if (payload.code === 'authenticated') {
+      this.authenticated = true
+      this.client.send('ntrip:test-status', {
+        ...payload,
+        code: 'authenticated',
+        message: '登录成功，正在等待有效 RTCM 数据',
+      })
+      return
+    }
+    if (payload.code === 'connecting') {
+      this.client.send('ntrip:test-status', payload)
+      return
+    }
+    this.finish(payload)
+  }
+
+  finish(payload) {
+    if (this.finished) return
+    this.finished = true
+    if (this.timeout) clearTimeout(this.timeout)
+    this.timeout = null
+    this.bridge.stop()
+    this.client.send('ntrip:test-status', payload)
+    this.onFinish()
+  }
+
+  stop() {
+    if (this.finished) return
+    this.finished = true
+    if (this.timeout) clearTimeout(this.timeout)
+    this.timeout = null
+    this.bridge.stop()
+    this.onFinish()
+  }
+}
+
 export function ntripBridgePlugin() {
   const helperPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ntripTransport.ps1')
   return {
@@ -274,15 +366,24 @@ export function ntripBridgePlugin() {
     apply: 'serve',
     configureServer(server) {
       const sessions = new Map()
+      const testSessions = new Map()
+      const registeredClients = new WeakSet()
+      const ensureClientCleanup = (client) => {
+        if (registeredClients.has(client)) return
+        registeredClients.add(client)
+        client.socket.once('close', () => {
+          sessions.get(client)?.stop()
+          sessions.delete(client)
+          testSessions.get(client)?.stop()
+          testSessions.delete(client)
+        })
+      }
       const getSession = (client) => {
+        ensureClientCleanup(client)
         let session = sessions.get(client)
         if (!session) {
           session = new NtripBridgeSession(client, helperPath, server.config.logger)
           sessions.set(client, session)
-          client.socket.once('close', () => {
-            session.stop()
-            sessions.delete(client)
-          })
         }
         return session
       }
@@ -292,15 +393,50 @@ export function ntripBridgePlugin() {
         sessions.get(client)?.stop()
         sessions.delete(client)
       }
+      const onTest = (data, client) => {
+        ensureClientCleanup(client)
+        testSessions.get(client)?.stop()
+        const requestId = String(data?.request_id || '')
+        if (!requestId) return
+        let session
+        const testClient = {
+          send(event, payload) {
+            client.send(event, { request_id: requestId, ...payload })
+          },
+        }
+        session = new NtripConnectionTestSession(
+          testClient,
+          helperPath,
+          server.config.logger,
+          () => {
+            if (testSessions.get(client) === session) testSessions.delete(client)
+          },
+        )
+        session.requestId = requestId
+        testSessions.set(client, session)
+        session.start(data?.config)
+      }
+      const onTestStop = (data, client) => {
+        const session = testSessions.get(client)
+        if (!session || (data?.request_id && String(data.request_id) !== session.requestId)) return
+        session.stop()
+        testSessions.delete(client)
+      }
       server.ws.on('ntrip:config', onConfig)
       server.ws.on('ntrip:position', onPosition)
       server.ws.on('ntrip:stop', onStop)
+      server.ws.on('ntrip:test', onTest)
+      server.ws.on('ntrip:test-stop', onTestStop)
       server.httpServer?.once('close', () => {
         for (const session of sessions.values()) session.stop()
         sessions.clear()
+        for (const session of testSessions.values()) session.stop()
+        testSessions.clear()
         server.ws.off('ntrip:config', onConfig)
         server.ws.off('ntrip:position', onPosition)
         server.ws.off('ntrip:stop', onStop)
+        server.ws.off('ntrip:test', onTest)
+        server.ws.off('ntrip:test-stop', onTestStop)
       })
     },
   }
