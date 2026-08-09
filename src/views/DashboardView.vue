@@ -130,7 +130,7 @@
             <button class="mode-btn-flat small" :class="{ 'active': !vehicle.armed }" @click="handlePause">暂停模式
             </button>
             <button class="mode-btn-flat small" :class="{ 'active': vehicle.mode === 'RETURN_TO_LAUNCH' }"
-                    @click="changeMode('RTL')">前往目标
+                    @click="changeMode('RTL')">前往返航点
             </button>
           </div>
         </section>
@@ -562,20 +562,24 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="gotoDialog.visible" title="目标设定" width="320px" class="hud-dialog" align-center
+    <el-dialog v-model="gotoDialog.visible" title="返航点设定" width="320px" class="hud-dialog" align-center
                append-to-body>
-      <div class="follow-form">
-        <div class="form-item"><label>目标经度</label><span class="coord-val">{{
-            gotoDialog.target.lng.toFixed(7)
-          }}</span></div>
-        <div class="form-item"><label>目标纬度</label><span class="coord-val">{{
-            gotoDialog.target.lat.toFixed(7)
-          }}</span></div>
+      <div class="goto-config-form">
+        <div class="goto-form-row">
+          <label>经度</label>
+          <el-input v-model="gotoDialog.target.lng" type="number" min="-180" max="180"
+                    step="0.0000001" inputmode="decimal"/>
+        </div>
+        <div class="goto-form-row">
+          <label>纬度</label>
+          <el-input v-model="gotoDialog.target.lat" type="number" min="-90" max="90"
+                    step="0.0000001" inputmode="decimal"/>
+        </div>
       </div>
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="gotoDialog.visible = false" class="hud-btn-cancel">取消</el-button>
-          <el-button type="primary" @click="confirmGoto" class="hud-btn-confirm">确认执行</el-button>
+          <el-button type="primary" @click="confirmGoto" class="hud-btn-confirm">确认设定</el-button>
         </span>
       </template>
     </el-dialog>
@@ -858,7 +862,10 @@ watch(() => vehicle.value.connected, (connected) => {
 // --- 指点模式逻辑 ---
 watch(() => mapTriggers.value.gotoTargetCandidate, (newTarget) => {
   if (newTarget) {
-    gotoDialog.value.target = newTarget;
+    gotoDialog.value.target = {
+      lat: Number(newTarget.lat),
+      lng: Number(newTarget.lng)
+    };
     gotoDialog.value.visible = true;
     // 清除候选，防止重复触发
     store.setGotoTargetCandidate(null);
@@ -1302,9 +1309,20 @@ const sendArmCommand = (action, force) => {
 };
 
 const confirmGoto = () => {
-  store.sendPacket('CMD_SET_HOME', {lat: gotoDialog.value.target.lat, lon: gotoDialog.value.target.lng, alt: 0});
+  const rawLat = gotoDialog.value.target.lat;
+  const rawLon = gotoDialog.value.target.lng;
+  const lat = Number(rawLat);
+  const lon = Number(rawLon);
+  if (String(rawLat).trim() === '' || String(rawLon).trim() === ''
+      || !Number.isFinite(lat) || lat < -90 || lat > 90
+      || !Number.isFinite(lon) || lon < -180 || lon > 180) {
+    store.pushNotification('返航点设定', '请输入有效的经纬度', 'warning');
+    return;
+  }
+
+  store.sendPacket('CMD_SET_HOME', {lat, lon, alt: 0});
   gotoDialog.value.visible = false;
-  store.pushNotification('指点飞行', '已发送前往目标点指令', 'success');
+  store.pushNotification('返航点设定', '已发送返航点设定指令', 'success');
 };
 
 // --- 摇杆逻辑 ---
@@ -2462,6 +2480,25 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid #444;
   color: #999;
+}
+
+.goto-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.goto-form-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.goto-form-row label {
+  color: #aaa;
+  font-size: 13px;
+  text-align: right;
 }
 
 .ntrip-config-form {
