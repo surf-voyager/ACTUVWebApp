@@ -130,7 +130,7 @@
             <button class="mode-btn-flat small" :class="{ 'active': !vehicle.armed }" @click="handlePause">暂停模式
             </button>
             <button class="mode-btn-flat small" :class="{ 'active': vehicle.mode === 'RETURN_TO_LAUNCH' }"
-                    @click="changeMode('RTL')">前往返航点
+                    @click="handleReturnHome">前往返航点
             </button>
           </div>
         </section>
@@ -1121,10 +1121,43 @@ const changeMode = (mode, payload_extra = {}) => {
   } else {
     executeChangeMode(mode, payload_extra);
   }
-  if (mode === 'RTL') {
-    if (!vehicle.value.armed) {
-      sendArmCommand('ARM', false);
-    }
+};
+
+const handleReturnHome = async () => {
+  if (!isWsConnected.value) {
+    store.pushNotification('返航失败', '后端通信已断开，无法执行返航', 'error');
+    return;
+  }
+  if (!vehicle.value.connected) {
+    store.pushNotification('返航失败', 'PX4 未连接，无法执行返航', 'error');
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+        '确认由后端自动解锁并前往返航点吗？',
+        '前往返航点确认',
+        {
+          confirmButtonText: '确认返航',
+          cancelButtonText: '取消',
+          type: 'warning',
+          customClass: 'hud-message-box'
+        }
+    );
+  } catch (_) {
+    return;
+  }
+
+  // 立即停止界面摇杆输出；后端在同一返航事务中退出手操、解锁并进入 RTL。
+  stopManualControlLoop();
+  controlState.value = {throttle: 0.0, steering: 0.0};
+  const requestId = store.sendPacket('CMD_RETURN_HOME', {});
+  if (requestId) {
+    store.pushNotification(
+        '前往返航点',
+        '正在校验返航点并请求后端自动解锁、进入返航模式',
+        'info'
+    );
   }
 };
 

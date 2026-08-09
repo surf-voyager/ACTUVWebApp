@@ -854,6 +854,15 @@ export const useGcsStore = defineStore('gcs', () => {
             return;
         }
 
+        if (command_type === 'CMD_RETURN_HOME') {
+            pushNotification(
+                success ? '返航已启动' : '返航失败',
+                message || (success ? 'PX4 已进入返航模式' : '返航流程执行失败'),
+                success ? 'success' : 'error'
+            );
+            return;
+        }
+
         if (success) {
             if (command_type !== 'CMD_MANUAL_CONTROL' && command_type !== 'CMD_SET_RELAY' && command_type !== 'CMD_GET_RECENT_LOGS') {
                 pushNotification('指令成功', message || '指令执行成功', 'success');
