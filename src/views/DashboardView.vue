@@ -824,8 +824,8 @@ const propulsionFillStyle = (channel, orientation) => {
   const extent = `${Math.abs(ratio) * 50}%`;
   if (orientation === 'vertical') {
     return ratio >= 0
-        ? {height: extent, bottom: '50%'}
-        : {height: extent, top: '50%'};
+        ? {height: extent, top: '50%'}
+        : {height: extent, bottom: '50%'};
   }
   return ratio >= 0
       ? {width: extent, left: '50%'}
