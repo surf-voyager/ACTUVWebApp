@@ -2,6 +2,12 @@ import {defineStore} from 'pinia'
 import {reactive, ref} from 'vue'
 import {ElMessage, ElNotification, ElMessageBox} from 'element-plus'
 import {NtripClient} from '../services/ntripClient'
+import {
+    normalizeWaypointAcceptanceRadius,
+    parseWaypointAcceptanceRadiusResponse,
+    waypointRadiusMatches,
+    waypointRadiusQueryDisposition
+} from '../services/waypointAcceptanceRadius'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -37,6 +43,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const vehicle = reactive({
         connected: false,
         armed: false,
+        armedKnown: false,
         mode: 'UNKNOWN',
         // 修改：适配新的电池数据结构
         battery: {
@@ -129,6 +136,19 @@ export const useGcsStore = defineStore('gcs', () => {
         result: null,
         displayText: '请选择查询项目后点击查询'
     });
+    const waypointAcceptanceRadius = reactive({
+        valueM: null,
+        queried: false,
+        queryPhase: 'IDLE',
+        setPhase: 'IDLE',
+        error: null,
+        lastUpdatedAt: 0,
+        pendingQueryRequestId: null,
+        pendingSetRequestId: null,
+        expectedValueM: null,
+        notifyOnQueryError: false,
+        refreshQueued: false
+    });
     const defaultNtripConfig = {
         host: 'rtk.ntrip.qxwz.com',
         port: 8002,
@@ -181,11 +201,18 @@ export const useGcsStore = defineStore('gcs', () => {
             const voltage = Number(data?.voltage_v);
             if (!Number.isFinite(voltage)) throw new Error('INVALID_RESULT');
             return `飞控供电电压：${voltage.toFixed(2)}V`;
+        },
+        WAYPOINT_ACCEPTANCE_RADIUS(data) {
+            const radius = parseWaypointAcceptanceRadiusResponse(data);
+            if (radius === null) throw new Error('INVALID_RESULT');
+            return `航点接受半径：${radius.toFixed(1)}m`;
         }
     };
     let leakWatchdogTimer = null;
     let leakRtlTimeout = null;
     let infoQueryTimeout = null;
+    let waypointRadiusQueryTimeout = null;
+    let waypointRadiusSetTimeout = null;
     let propulsionFeedbackWatchdogTimer = null;
     let requestSequence = 0;
 
@@ -259,7 +286,42 @@ export const useGcsStore = defineStore('gcs', () => {
         }
     }
 
+    function clearWaypointRadiusTimers() {
+        if (waypointRadiusQueryTimeout) clearTimeout(waypointRadiusQueryTimeout);
+        if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
+        waypointRadiusQueryTimeout = null;
+        waypointRadiusSetTimeout = null;
+    }
+
+    function clearWaypointAcceptanceRadius(reason = null) {
+        clearWaypointRadiusTimers();
+        Object.assign(waypointAcceptanceRadius, {
+            valueM: null,
+            queried: false,
+            queryPhase: 'IDLE',
+            setPhase: 'IDLE',
+            error: reason,
+            lastUpdatedAt: 0,
+            pendingQueryRequestId: null,
+            pendingSetRequestId: null,
+            expectedValueM: null,
+            notifyOnQueryError: false,
+            refreshQueued: false
+        });
+    }
+
+    function applyWaypointAcceptanceRadius(data) {
+        const radius = parseWaypointAcceptanceRadiusResponse(data);
+        if (radius === null) return false;
+        waypointAcceptanceRadius.valueM = radius;
+        waypointAcceptanceRadius.queried = true;
+        waypointAcceptanceRadius.error = null;
+        waypointAcceptanceRadius.lastUpdatedAt = Date.now();
+        return true;
+    }
+
     function finishInfoQueryError(errorCode) {
+        const failedQueryId = infoQuery.pendingQueryId;
         clearInfoQueryTimeout();
         infoQuery.phase = 'ERROR';
         infoQuery.pendingRequestId = null;
@@ -267,6 +329,14 @@ export const useGcsStore = defineStore('gcs', () => {
         infoQuery.result = null;
         infoQuery.displayText = INFO_QUERY_ERROR_TEXT[errorCode]
             || '查询失败：未知错误';
+        if (failedQueryId === 'WAYPOINT_ACCEPTANCE_RADIUS') {
+            waypointAcceptanceRadius.valueM = null;
+            waypointAcceptanceRadius.queried = false;
+            waypointAcceptanceRadius.queryPhase = 'ERROR';
+            waypointAcceptanceRadius.error = infoQuery.displayText;
+            waypointAcceptanceRadius.lastUpdatedAt = 0;
+        }
+        drainQueuedWaypointRadiusQuery();
     }
 
     function failPendingInfoQuery(errorCode) {
@@ -353,9 +423,11 @@ export const useGcsStore = defineStore('gcs', () => {
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
+            vehicle.armedKnown = false;
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
+            clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
             if (heartbeatTimer) {
@@ -378,9 +450,11 @@ export const useGcsStore = defineStore('gcs', () => {
             console.error("WebSocket 错误:", err);
             isWsConnected.value = false;
             vehicle.connected = false;
+            vehicle.armedKnown = false;
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
+            clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
     }
@@ -403,9 +477,11 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         isWsConnected.value = false;
         vehicle.connected = false;
+        vehicle.armedKnown = false;
         clearLivePosition('BACKEND_DISCONNECTED');
         resetPropulsionFeedback('backend_disconnected');
         failPendingInfoQuery('BACKEND_DISCONNECTED');
+        clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
 
@@ -635,8 +711,12 @@ export const useGcsStore = defineStore('gcs', () => {
 
             case 'DATA_STATUS':
                 vehicle.connected = payload.is_connected;
-                if (!vehicle.connected) clearLivePosition('PX4_DISCONNECTED');
+                if (!vehicle.connected) {
+                    clearLivePosition('PX4_DISCONNECTED');
+                    clearWaypointAcceptanceRadius('PX4_DISCONNECTED');
+                }
                 vehicle.armed = payload.is_armed;
+                vehicle.armedKnown = payload.is_armed_known === true;
                 vehicle.mode = payload.flight_mode;
                 // 修改：直接赋值新的电池对象
                 if (payload.battery) {
@@ -736,6 +816,25 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function handleAck(payload) {
         const {request_id, command_type, success, message} = payload;
+        if (command_type === 'CMD_SET_WAYPOINT_ACCEPTANCE_RADIUS'
+            && request_id === waypointAcceptanceRadius.pendingSetRequestId) {
+            if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
+            waypointRadiusSetTimeout = null;
+            waypointAcceptanceRadius.pendingSetRequestId = null;
+
+            if (!success) {
+                waypointAcceptanceRadius.setPhase = 'ERROR';
+                waypointAcceptanceRadius.expectedValueM = null;
+                waypointAcceptanceRadius.error = message || '配置失败';
+                pushNotification('航点接受半径', message || '配置失败', 'error');
+                return;
+            }
+
+            waypointAcceptanceRadius.setPhase = 'VERIFYING';
+            waypointAcceptanceRadius.error = null;
+            requestWaypointAcceptanceRadius({notifyOnError: true});
+            return;
+        }
         const isLeakRtlAck = command_type === 'CMD_SET_MODE'
             && request_id
             && request_id === leakAlert.rtlRequestId;
@@ -778,6 +877,11 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function handleInfoQueryResult(payload = {}) {
+        if (payload.request_id === waypointAcceptanceRadius.pendingQueryRequestId
+            && payload.query_id === 'WAYPOINT_ACCEPTANCE_RADIUS') {
+            finishBackgroundWaypointRadiusQuery(payload);
+            return;
+        }
         if (infoQuery.phase !== 'PENDING') return;
         if (payload.request_id !== infoQuery.pendingRequestId) return;
         if (payload.query_id !== infoQuery.pendingQueryId) return;
@@ -795,12 +899,20 @@ export const useGcsStore = defineStore('gcs', () => {
 
         try {
             const displayText = formatter(payload.data);
+            if (payload.query_id === 'WAYPOINT_ACCEPTANCE_RADIUS'
+                && !applyWaypointAcceptanceRadius(payload.data)) {
+                throw new Error('INVALID_RESULT');
+            }
+            if (payload.query_id === 'WAYPOINT_ACCEPTANCE_RADIUS') {
+                waypointAcceptanceRadius.queryPhase = 'SUCCESS';
+            }
             clearInfoQueryTimeout();
             infoQuery.phase = 'SUCCESS';
             infoQuery.pendingRequestId = null;
             infoQuery.pendingQueryId = null;
             infoQuery.result = payload.data;
             infoQuery.displayText = displayText;
+            drainQueuedWaypointRadiusQuery();
         } catch (error) {
             finishInfoQueryError(error?.message || 'INVALID_RESULT');
         }
@@ -868,6 +980,12 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function requestInformationQuery(queryId = infoQuery.selectedId) {
         if (infoQuery.phase === 'PENDING') return false;
+        if (waypointAcceptanceRadius.queryPhase === 'PENDING') {
+            infoQuery.phase = 'ERROR';
+            infoQuery.result = null;
+            infoQuery.displayText = INFO_QUERY_ERROR_TEXT.QUERY_BUSY;
+            return false;
+        }
         if (!isWsConnected.value) {
             infoQuery.phase = 'ERROR';
             infoQuery.result = null;
@@ -893,6 +1011,159 @@ export const useGcsStore = defineStore('gcs', () => {
         infoQueryTimeout = setTimeout(() => {
             if (infoQuery.pendingRequestId !== requestId) return;
             finishInfoQueryError('FRONTEND_TIMEOUT');
+        }, INFO_QUERY_TIMEOUT_MS);
+        return true;
+    }
+
+    function finishBackgroundWaypointRadiusQuery(payload) {
+        if (waypointRadiusQueryTimeout) clearTimeout(waypointRadiusQueryTimeout);
+        waypointRadiusQueryTimeout = null;
+        waypointAcceptanceRadius.pendingQueryRequestId = null;
+
+        let errorMessage = null;
+        if (!payload.success) {
+            const errorCode = payload.error?.code || 'INVALID_RESULT';
+            errorMessage = INFO_QUERY_ERROR_TEXT[errorCode] || '航点接受半径查询失败';
+        } else {
+            const returnedRadius = parseWaypointAcceptanceRadiusResponse(payload.data);
+            if (returnedRadius === null) {
+                errorMessage = INFO_QUERY_ERROR_TEXT.INVALID_RESULT;
+            } else if (waypointAcceptanceRadius.expectedValueM !== null
+                && !waypointRadiusMatches(
+                    returnedRadius,
+                    waypointAcceptanceRadius.expectedValueM
+                )) {
+            errorMessage = `配置校验失败：期望 ${waypointAcceptanceRadius.expectedValueM.toFixed(1)}m，`
+                    + `飞控返回 ${returnedRadius.toFixed(1)}m`;
+            } else {
+                applyWaypointAcceptanceRadius(payload.data);
+            }
+        }
+
+        if (errorMessage) {
+            waypointAcceptanceRadius.valueM = null;
+            waypointAcceptanceRadius.queried = false;
+            waypointAcceptanceRadius.lastUpdatedAt = 0;
+            waypointAcceptanceRadius.queryPhase = 'ERROR';
+            waypointAcceptanceRadius.error = errorMessage;
+            if (waypointAcceptanceRadius.setPhase === 'VERIFYING') {
+                waypointAcceptanceRadius.setPhase = 'ERROR';
+            }
+            if (waypointAcceptanceRadius.notifyOnQueryError) {
+                pushNotification('航点接受半径', errorMessage, 'warning');
+            }
+        } else {
+            waypointAcceptanceRadius.queryPhase = 'SUCCESS';
+            if (waypointAcceptanceRadius.setPhase === 'VERIFYING') {
+                waypointAcceptanceRadius.setPhase = 'SUCCESS';
+                pushNotification(
+                    '航点接受半径',
+                    `已配置并确认 ${waypointAcceptanceRadius.valueM.toFixed(1)}m`,
+                    'success'
+                );
+            }
+        }
+
+        waypointAcceptanceRadius.expectedValueM = null;
+        waypointAcceptanceRadius.notifyOnQueryError = false;
+        drainQueuedWaypointRadiusQuery();
+    }
+
+    function drainQueuedWaypointRadiusQuery() {
+        if (!waypointAcceptanceRadius.refreshQueued
+            || infoQuery.phase === 'PENDING'
+            || waypointAcceptanceRadius.queryPhase === 'PENDING') return;
+        waypointAcceptanceRadius.refreshQueued = false;
+        requestWaypointAcceptanceRadius({notifyOnError: true});
+    }
+
+    function requestWaypointAcceptanceRadius({notifyOnError = false} = {}) {
+        const disposition = waypointRadiusQueryDisposition(
+            infoQuery.phase === 'PENDING',
+            waypointAcceptanceRadius.queryPhase === 'PENDING'
+        );
+        if (disposition === 'IGNORE') return false;
+        if (disposition === 'QUEUE') {
+            waypointAcceptanceRadius.refreshQueued = true;
+            waypointAcceptanceRadius.notifyOnQueryError ||= notifyOnError;
+            return false;
+        }
+        if (!isWsConnected.value || !vehicle.connected) {
+            waypointAcceptanceRadius.queryPhase = 'ERROR';
+            waypointAcceptanceRadius.error = !isWsConnected.value
+                ? INFO_QUERY_ERROR_TEXT.BACKEND_DISCONNECTED
+                : INFO_QUERY_ERROR_TEXT.PX4_NOT_CONNECTED;
+            if (notifyOnError) {
+                pushNotification(
+                    '航点接受半径',
+                    waypointAcceptanceRadius.error,
+                    'warning'
+                );
+            }
+            return false;
+        }
+
+        const requestId = sendPacket('CMD_QUERY_INFO', {
+            query_id: 'WAYPOINT_ACCEPTANCE_RADIUS'
+        });
+        if (!requestId) return false;
+
+        waypointAcceptanceRadius.queryPhase = 'PENDING';
+        waypointAcceptanceRadius.pendingQueryRequestId = requestId;
+        waypointAcceptanceRadius.notifyOnQueryError = notifyOnError;
+        waypointAcceptanceRadius.error = null;
+        if (waypointRadiusQueryTimeout) clearTimeout(waypointRadiusQueryTimeout);
+        waypointRadiusQueryTimeout = setTimeout(() => {
+            if (waypointAcceptanceRadius.pendingQueryRequestId !== requestId) return;
+            finishBackgroundWaypointRadiusQuery({
+                request_id: requestId,
+                query_id: 'WAYPOINT_ACCEPTANCE_RADIUS',
+                success: false,
+                error: {code: 'FRONTEND_TIMEOUT'}
+            });
+        }, INFO_QUERY_TIMEOUT_MS);
+        return true;
+    }
+
+    function setWaypointAcceptanceRadius(value) {
+        const radius = normalizeWaypointAcceptanceRadius(value);
+        if (radius === null) {
+            pushNotification('航点接受半径', '请输入 0.05–200.0m 范围内的数值', 'warning');
+            return false;
+        }
+        if (!isWsConnected.value || !vehicle.connected) {
+            pushNotification('航点接受半径', '后端或 PX4 未连接', 'warning');
+            return false;
+        }
+        if (!vehicle.armedKnown) {
+            pushNotification('航点接受半径', 'PX4 解锁状态未知，无法配置', 'warning');
+            return false;
+        }
+        if (vehicle.armed) {
+            pushNotification('航点接受半径', '请先上锁 PX4 再配置', 'warning');
+            return false;
+        }
+        if (waypointAcceptanceRadius.setPhase === 'PENDING'
+            || waypointAcceptanceRadius.setPhase === 'VERIFYING') return false;
+
+        const requestId = sendPacket('CMD_SET_WAYPOINT_ACCEPTANCE_RADIUS', {
+            radius_m: radius
+        });
+        if (!requestId) return false;
+
+        waypointAcceptanceRadius.setPhase = 'PENDING';
+        waypointAcceptanceRadius.pendingSetRequestId = requestId;
+        waypointAcceptanceRadius.expectedValueM = radius;
+        waypointAcceptanceRadius.error = null;
+        if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
+        waypointRadiusSetTimeout = setTimeout(() => {
+            if (waypointAcceptanceRadius.pendingSetRequestId !== requestId) return;
+            waypointAcceptanceRadius.pendingSetRequestId = null;
+            waypointAcceptanceRadius.expectedValueM = null;
+            waypointAcceptanceRadius.setPhase = 'ERROR';
+            waypointAcceptanceRadius.error = '配置请求超时，请重试';
+            pushNotification('航点接受半径', waypointAcceptanceRadius.error, 'error');
+            waypointRadiusSetTimeout = null;
         }, INFO_QUERY_TIMEOUT_MS);
         return true;
     }
@@ -1121,6 +1392,7 @@ export const useGcsStore = defineStore('gcs', () => {
         controlStatus,
         leakAlert,
         infoQuery,
+        waypointAcceptanceRadius,
         ntripConfig,
         ntripStatus,
         isWsConnected,
@@ -1134,6 +1406,8 @@ export const useGcsStore = defineStore('gcs', () => {
         sendManualControl,
         requestLeakReturn,
         requestInformationQuery,
+        requestWaypointAcceptanceRadius,
+        setWaypointAcceptanceRadius,
         startLeakAlertWatchdog,
         stopLeakAlertWatchdog,
         startPropulsionFeedbackWatchdog,

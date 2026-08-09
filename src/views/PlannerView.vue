@@ -25,6 +25,35 @@
                 </div>
               </div>
 
+              <div class="acceptance-radius-bar">
+                <div class="acceptance-radius-main">
+                  <span class="bar-label">航点接受半径</span>
+                  <div class="radius-input-wrap">
+                    <input
+                      v-model="acceptanceRadiusDraft"
+                      type="number"
+                      class="hud-input radius-input"
+                      min="0.05"
+                      max="200"
+                      step="0.1"
+                      placeholder="未查询"
+                      aria-label="航点接受半径"
+                    >
+                    <span class="radius-unit">m</span>
+                  </div>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :loading="isAcceptanceRadiusSetting"
+                    :disabled="Boolean(acceptanceRadiusDisabledReason)"
+                    @click="handleSetAcceptanceRadius"
+                  >配置</el-button>
+                </div>
+                <div class="acceptance-radius-status" :class="{ confirmed: waypointAcceptanceRadius.queried }">
+                  {{ acceptanceRadiusStatusText }}
+                </div>
+              </div>
+
               <div class="tools-header">
                 <span class="info-text">共 {{ mission.plannedWaypoints.length }} 个航点 (可拖拽排序)</span>
                 <el-button type="danger" link size="small" @click="handleClear">清空</el-button>
@@ -128,7 +157,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, reactive, watch } from 'vue';
+import { computed, ref, onMounted, reactive, watch } from 'vue';
 import { useGcsStore } from '../store/useGcsStore';
 import { storeToRefs } from 'pinia';
 import { ElMessageBox, ElMessage, ElNotification } from 'element-plus';
@@ -137,11 +166,58 @@ import { Upload, Close, ArrowRight, ArrowLeft, Grid, MapLocation } from '@elemen
 import * as turf from '@turf/turf';
 
 const store = useGcsStore();
-const { mission } = storeToRefs(store);
+const {
+  mission,
+  vehicle,
+  isWsConnected,
+  infoQuery,
+  waypointAcceptanceRadius
+} = storeToRefs(store);
 
 const isCollapsed = ref(false);
 const activeTab = ref('mission');
 const tableRef = ref(null);
+const acceptanceRadiusDraft = ref('');
+
+const parsedAcceptanceRadius = computed(() => {
+  if (acceptanceRadiusDraft.value === '') return null;
+  const value = Number(acceptanceRadiusDraft.value);
+  return Number.isFinite(value) && value >= 0.05 && value <= 200 ? value : null;
+});
+const isAcceptanceRadiusSetting = computed(() =>
+  ['PENDING', 'VERIFYING'].includes(waypointAcceptanceRadius.value.setPhase)
+);
+const acceptanceRadiusDisabledReason = computed(() => {
+  if (!isWsConnected.value) return '后端未连接';
+  if (!vehicle.value.connected) return 'PX4 未连接';
+  if (!vehicle.value.armedKnown) return 'PX4 解锁状态未知';
+  if (vehicle.value.armed) return '请先上锁 PX4';
+  if (parsedAcceptanceRadius.value === null) return '请输入 0.05–200.0m';
+  if (infoQuery.value.phase === 'PENDING'
+      || waypointAcceptanceRadius.value.queryPhase === 'PENDING') return '正在查询飞控参数';
+  if (isAcceptanceRadiusSetting.value) return '正在配置';
+  return '';
+});
+const acceptanceRadiusStatusText = computed(() => {
+  if (waypointAcceptanceRadius.value.setPhase === 'VERIFYING') return '正在回读确认…';
+  if (waypointAcceptanceRadius.value.setPhase === 'PENDING') return '正在写入飞控参数…';
+  if (vehicle.value.armed) return '请先暂停并确认飞控上锁';
+  if (waypointAcceptanceRadius.value.queried) {
+    return `飞控当前值：${waypointAcceptanceRadius.value.valueM.toFixed(1)} m`;
+  }
+  return acceptanceRadiusDisabledReason.value || '尚未查询飞控参数';
+});
+
+watch(() => waypointAcceptanceRadius.value.valueM, (value) => {
+  if (waypointAcceptanceRadius.value.queried && Number.isFinite(value)) {
+    acceptanceRadiusDraft.value = value.toFixed(1);
+  }
+}, {immediate: true});
+
+const handleSetAcceptanceRadius = () => {
+  if (acceptanceRadiusDisabledReason.value) return;
+  store.setWaypointAcceptanceRadius(parsedAcceptanceRadius.value);
+};
 
 const areaParams = reactive({
   horizontalSpacing: 20,
@@ -226,7 +302,6 @@ const handleUpload = () => {
     longitude: pt.lng,
     relative_altitude_m: 0, // 水面船高度 0
     speed_m_s: pt.speed,
-    acceptance_radius_m: 3.0, // 可以做成全局配置
     yaw_deg: Number.NaN, // 自动航向
     is_fly_through: true
   }));
@@ -351,6 +426,26 @@ function calculateSPath(points, params) {
   display: flex; align-items: center; gap: 8px;
   background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; margin-bottom: 10px;
 }
+.acceptance-radius-bar {
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid rgba(64, 158, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(64, 158, 255, 0.07);
+}
+.acceptance-radius-main { display: flex; align-items: center; gap: 7px; }
+.acceptance-radius-main .bar-label { flex: 1; white-space: nowrap; }
+.radius-input-wrap { position: relative; width: 72px; }
+.radius-input { padding-right: 19px; }
+.radius-unit {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  color: #909399; font-size: 10px; pointer-events: none;
+}
+.acceptance-radius-status {
+  margin-top: 5px; color: #909399; font-size: 10px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.acceptance-radius-status.confirmed { color: #67c23a; }
 .bar-label { font-size: 11px; color: #aaa; }
 .input-group { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #ddd; }
 .hud-input.mini { width: 40px; padding: 2px; text-align: center; }

@@ -26,9 +26,17 @@ import boatIconImg from '../../assets/navigator-arrows.svg';
 import { useGcsStore } from '../../store/useGcsStore';
 import { storeToRefs } from 'pinia';
 import { useRoute } from 'vue-router';
+import {shouldRenderWaypointAcceptanceRadius} from '../../services/waypointAcceptanceRadius';
 
 const store = useGcsStore();
-const { vehicle, mapTriggers, plannerMode, areaPoints, mission } = storeToRefs(store);
+const {
+  vehicle,
+  mapTriggers,
+  plannerMode,
+  areaPoints,
+  mission,
+  waypointAcceptanceRadius
+} = storeToRefs(store);
 
 const hasValidEkfPosition = (position) => {
   const lat = Number(position?.lat);
@@ -273,6 +281,21 @@ const renderMissionFromStore = () => {
   if (!waypoints || waypoints.length === 0) return;
   const latlngs = waypoints.map(p => [p.lat, p.lng]);
 
+  const acceptanceRadiusM = Number(waypointAcceptanceRadius.value.valueM);
+  if (shouldRenderWaypointAcceptanceRadius(waypointAcceptanceRadius.value)) {
+    waypoints.forEach((pt) => {
+      L.circle([pt.lat, pt.lng], {
+        radius: acceptanceRadiusM,
+        color: '#f5c542',
+        weight: 2,
+        opacity: 0.9,
+        fill: false,
+        dashArray: '6, 7',
+        interactive: false,
+      }).addTo(missionLayerGroup);
+    });
+  }
+
   L.polyline(latlngs, {
     color: 'white', weight: 6, opacity: 0.9, lineJoin: 'round'
   }).addTo(missionLayerGroup);
@@ -433,6 +456,11 @@ watch(() => mapTriggers.value.redrawMission, (val) => {
     renderAreaSelection(); // 同时重绘区域
   }
 });
+
+watch(
+  () => [waypointAcceptanceRadius.value.queried, waypointAcceptanceRadius.value.valueM],
+  () => renderMissionFromStore()
+);
 
 watch(() => mapTriggers.value.clearMap, (val) => {
   if (val && missionLayerGroup) {

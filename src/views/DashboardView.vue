@@ -58,7 +58,7 @@
               <el-select
                   v-model="infoQuery.selectedId"
                   class="info-query-select"
-                  :disabled="infoQuery.phase === 'PENDING'"
+                  :disabled="infoQuery.phase === 'PENDING' || waypointAcceptanceRadius.queryPhase === 'PENDING'"
                   aria-label="查询项目"
               >
                 <el-option
@@ -72,7 +72,7 @@
                   type="primary"
                   class="info-query-button"
                   :loading="infoQuery.phase === 'PENDING'"
-                  :disabled="!isWsConnected || infoQuery.phase === 'PENDING'"
+                  :disabled="!isWsConnected || infoQuery.phase === 'PENDING' || waypointAcceptanceRadius.queryPhase === 'PENDING'"
                   @click="handleInfoQuery"
               >
                 查询
@@ -649,12 +649,14 @@ const {
   wsUrl,
   controlStatus,
   infoQuery,
+  waypointAcceptanceRadius,
   ntripConfig,
   ntripStatus
 } = storeToRefs(store);
 
 const infoQueryOptions = [
-  {id: 'PX4_POWER_VOLTAGE', label: '飞控供电电压'}
+  {id: 'PX4_POWER_VOLTAGE', label: '飞控供电电压'},
+  {id: 'WAYPOINT_ACCEPTANCE_RADIUS', label: '航点接受半径'}
 ];
 
 // --- 状态变量 ---
@@ -847,6 +849,9 @@ watch(() => vehicle.value.connected, (connected) => {
     }
     store.sendPacket("CMD_DOWNLOAD_MISSION", {});
     store.mapTriggers.centerMap = true;
+    if (vehicle.value.mode === 'MISSION') {
+      store.requestWaypointAcceptanceRadius({notifyOnError: true});
+    }
   }
 }, {immediate: true});
 
@@ -1186,6 +1191,13 @@ watch(() => vehicle.value.mode, (newMode) => {
         store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'});
       }, 500);
     }
+  }
+});
+
+// PX4 实际进入任务模式时后台读取一次 NAV_ACC_RAD。该查询不改变信息查询面板。
+watch(() => vehicle.value.mode, (newMode, oldMode) => {
+  if (newMode === 'MISSION' && oldMode !== 'MISSION') {
+    store.requestWaypointAcceptanceRadius({notifyOnError: true});
   }
 });
 
