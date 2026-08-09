@@ -641,6 +641,10 @@ import {
   VideoPlay
 } from '@element-plus/icons-vue';
 import {ElMessageBox} from 'element-plus';
+import {
+  MISSION_HOLD_DISPOSITION,
+  missionHoldDisposition
+} from '../services/missionCompletion';
 
 const store = useGcsStore();
 const {
@@ -669,6 +673,8 @@ const lastMissionStartTime = ref(0);
 const lastTargetIndex = ref(0);
 const resumeCooldown = ref(0);
 let cooldownTimer = null;
+let missionHoldTimer = null;
+const MISSION_HOLD_SETTLE_MS = 1000;
 const gotoDialog = ref({visible: false, target: {lat: 0, lng: 0}, heading: 0});
 const missionStartDialog = ref({visible: false, startIndex: 1});
 const wsDialog = ref({visible: false, newAddress: ''});
@@ -1206,31 +1212,82 @@ const executeChangeMode = (mode, payload_extra) => {
   let payload = {mode: mode, ...payload_extra};
   store.sendPacket('CMD_SET_MODE', payload);
   if (mode === 'MISSION') {
+    if (missionHoldTimer) {
+      clearTimeout(missionHoldTimer);
+      missionHoldTimer = null;
+    }
+    const startIndex = Number(payload.mission_item_index);
+    if (Number.isInteger(startIndex) && startIndex >= 0) {
+      mission.value.progress.current = startIndex;
+    }
     missionState.value = 'EXECUTING';
     setTimeout(() => store.setRelay(1), 2000);
   }
 }
 
-// 监听模式异常切回 HOLD 的自动恢复逻辑
+const clearMissionHoldTimer = () => {
+  if (!missionHoldTimer) return;
+  clearTimeout(missionHoldTimer);
+  missionHoldTimer = null;
+};
+
+const markMissionCompleted = () => {
+  if (missionState.value !== 'EXECUTING') return;
+  clearMissionHoldTimer();
+  missionState.value = 'COMPLETED';
+  store.pushNotification(
+      '任务完成',
+      '已完成最后一个航点，PX4 已进入 HOLD',
+      'success'
+  );
+};
+
+// HOLD 可能是任务正常完成，也可能是启动阶段异常退出；等待进度消息收敛后再判断。
 watch(() => vehicle.value.mode, (newMode) => {
-  if (newMode === 'HOLD' && missionState.value === 'EXECUTING') {
-    const now = Date.now();
-    // 如果在开启 5 秒内切回 HOLD
-    if (now - lastMissionStartTime.value < 5000) {
-      store.pushNotification('自动恢复', '检测到任务意外中断，正在尝试重新执行...', 'warning');
+  clearMissionHoldTimer();
+  if (newMode !== 'HOLD' || missionState.value !== 'EXECUTING') return;
 
-      const targetIndex = lastTargetIndex.value;
-      // 重复发送指令
-      store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex});
+  const elapsedAtHold = Date.now() - lastMissionStartTime.value;
+  missionHoldTimer = setTimeout(() => {
+    missionHoldTimer = null;
+    const disposition = missionHoldDisposition({
+      flightMode: vehicle.value.mode,
+      missionState: missionState.value,
+      current: mission.value.progress.current,
+      total: mission.value.progress.total,
+      elapsedSinceStartMs: elapsedAtHold
+    });
 
-      setTimeout(() => {
-        // 如果是因为 Disarm 导致的 HOLD，重新 Arm
-        if (!vehicle.value.armed) {
-          sendArmCommand('ARM', false);
-        }
-        store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'});
-      }, 500);
+    if (disposition === MISSION_HOLD_DISPOSITION.COMPLETE) {
+      markMissionCompleted();
+      return;
     }
+    if (disposition !== MISSION_HOLD_DISPOSITION.RECOVER) return;
+
+    store.pushNotification('自动恢复', '检测到任务意外中断，正在尝试重新执行...', 'warning');
+    const targetIndex = lastTargetIndex.value;
+    store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex});
+
+    setTimeout(() => {
+      if (!vehicle.value.armed) {
+        sendArmCommand('ARM', false);
+      }
+      store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'});
+    }, 500);
+  }, MISSION_HOLD_SETTLE_MS);
+});
+
+// 如果任务进度比模式更新更晚到达，仍能把预期 HOLD 识别为正常完成。
+watch(() => [mission.value.progress.current, mission.value.progress.total], ([current, total]) => {
+  const disposition = missionHoldDisposition({
+    flightMode: vehicle.value.mode,
+    missionState: missionState.value,
+    current,
+    total,
+    elapsedSinceStartMs: Date.now() - lastMissionStartTime.value
+  });
+  if (disposition === MISSION_HOLD_DISPOSITION.COMPLETE) {
+    markMissionCompleted();
   }
 });
 
@@ -1394,6 +1451,7 @@ onUnmounted(() => {
   resetNtripConnectionTest();
   if (import.meta.hot) import.meta.hot.off('ntrip:test-status', handleNtripTestStatus);
   stopManualControlLoop();
+  clearMissionHoldTimer();
   if (reconnectTimer) clearInterval(reconnectTimer);
   if (cooldownTimer) clearInterval(cooldownTimer);
 });
