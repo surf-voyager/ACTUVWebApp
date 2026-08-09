@@ -132,7 +132,8 @@ const initLayerGroups = () => {
 const initOfflineSystem = () => {
   const googleHybridUrl = 'https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}';
   baseLayer = L.tileLayer.offline(googleHybridUrl, {
-    maxZoom: 20,
+    maxNativeZoom: 20,
+    maxZoom: 22,
     subdomains: ['0', '1', '2', '3'],
     location: 'indexedDB',
     saveWhatYouOnto: true,
