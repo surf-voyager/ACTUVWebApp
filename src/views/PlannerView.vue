@@ -56,7 +56,10 @@
 
               <div class="tools-header">
                 <span class="info-text">共 {{ mission.plannedWaypoints.length }} 个航点 (可拖拽排序)</span>
-                <el-button type="danger" link size="small" @click="handleClear">清空</el-button>
+                <el-button type="danger" link size="small"
+                           :loading="mission.clearOperation.phase === 'PENDING'"
+                           :disabled="mission.clearOperation.phase === 'PENDING'"
+                           @click="handleClear">清空</el-button>
               </div>
 
               <el-table
@@ -282,10 +285,13 @@ const confirmRemove = (index) => {
 };
 
 const handleClear = () => {
-  ElMessageBox.confirm('确定要清空所有航点吗?', '警告', {
-    confirmButtonText: '清空', cancelButtonText: '取消', type: 'error'
+  ElMessageBox.confirm(
+      '此操作将同时永久清空前端本地航点和 PX4 中的任务，且无法撤销。确定继续吗？',
+      '清空全部航点', {
+    confirmButtonText: '确认永久清空', cancelButtonText: '取消', type: 'error',
+    customClass: 'hud-message-box'
   }).then(() => {
-    store.triggerMapClear();
+    store.requestMissionClear();
   }).catch(()=>{});
 };
 

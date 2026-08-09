@@ -88,6 +88,11 @@ export const useGcsStore = defineStore('gcs', () => {
         progress: {
             current: 0,
             total: 0
+        },
+        clearOperation: {
+            phase: 'IDLE',
+            pendingRequestId: null,
+            error: null
         }
     })
     
@@ -183,6 +188,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const BACKEND_CHANNEL_STALE_MS = 1500;
     const LEAK_ALERT_LINGER_MS = 10000;
     const INFO_QUERY_TIMEOUT_MS = 6000;
+    const MISSION_CLEAR_TIMEOUT_MS = 10000;
     const PROPULSION_FEEDBACK_STALE_MS = 2000;
     const INFO_QUERY_ERROR_TEXT = {
         INVALID_REQUEST: '查询失败：请求格式错误',
@@ -213,6 +219,7 @@ export const useGcsStore = defineStore('gcs', () => {
     let infoQueryTimeout = null;
     let waypointRadiusQueryTimeout = null;
     let waypointRadiusSetTimeout = null;
+    let missionClearTimeout = null;
     let propulsionFeedbackWatchdogTimer = null;
     let requestSequence = 0;
 
@@ -291,6 +298,23 @@ export const useGcsStore = defineStore('gcs', () => {
         if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
         waypointRadiusQueryTimeout = null;
         waypointRadiusSetTimeout = null;
+    }
+
+    function clearMissionClearTimeout() {
+        if (!missionClearTimeout) return;
+        clearTimeout(missionClearTimeout);
+        missionClearTimeout = null;
+    }
+
+    function failPendingMissionClear(message) {
+        if (mission.clearOperation.phase !== 'PENDING') return;
+        clearMissionClearTimeout();
+        Object.assign(mission.clearOperation, {
+            phase: 'ERROR',
+            pendingRequestId: null,
+            error: message
+        });
+        pushNotification('任务清空失败', message, 'error');
     }
 
     function clearWaypointAcceptanceRadius(reason = null) {
@@ -427,6 +451,7 @@ export const useGcsStore = defineStore('gcs', () => {
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
+            failPendingMissionClear('后端连接已断开，本地航点已保留');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
@@ -454,6 +479,7 @@ export const useGcsStore = defineStore('gcs', () => {
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
+            failPendingMissionClear('后端连接异常，本地航点已保留');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
@@ -481,6 +507,7 @@ export const useGcsStore = defineStore('gcs', () => {
         clearLivePosition('BACKEND_DISCONNECTED');
         resetPropulsionFeedback('backend_disconnected');
         failPendingInfoQuery('BACKEND_DISCONNECTED');
+        failPendingMissionClear('后端连接已断开，本地航点已保留');
         clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
@@ -863,6 +890,33 @@ export const useGcsStore = defineStore('gcs', () => {
             return;
         }
 
+        if (command_type === 'CMD_CLEAR_MISSION') {
+            if (request_id !== mission.clearOperation.pendingRequestId) return;
+            clearMissionClearTimeout();
+            mission.clearOperation.pendingRequestId = null;
+
+            if (!success) {
+                mission.clearOperation.phase = 'ERROR';
+                mission.clearOperation.error = message || '飞控任务清空失败';
+                pushNotification(
+                    '任务清空失败',
+                    `${mission.clearOperation.error}，本地航点已保留`,
+                    'error'
+                );
+                return;
+            }
+
+            triggerMapClear();
+            mission.clearOperation.phase = 'SUCCESS';
+            mission.clearOperation.error = null;
+            pushNotification(
+                '任务已清空',
+                message || '前端本地航点和 PX4 任务均已清空',
+                'success'
+            );
+            return;
+        }
+
         if (success) {
             if (command_type !== 'CMD_MANUAL_CONTROL' && command_type !== 'CMD_SET_RELAY' && command_type !== 'CMD_GET_RECENT_LOGS') {
                 pushNotification('指令成功', message || '指令执行成功', 'success');
@@ -985,6 +1039,53 @@ export const useGcsStore = defineStore('gcs', () => {
         }
         socket.send(JSON.stringify(packet));
         return requestId;
+    }
+
+    function requestMissionClear() {
+        if (mission.clearOperation.phase === 'PENDING') return false;
+        if (!isWsConnected.value) {
+            pushNotification('任务清空失败', '后端未连接，本地航点已保留', 'error');
+            return false;
+        }
+        if (!vehicle.connected) {
+            pushNotification('任务清空失败', 'PX4 未连接，本地航点已保留', 'error');
+            return false;
+        }
+        if (!vehicle.armedKnown) {
+            pushNotification('任务清空失败', 'PX4 解锁状态未知，本地航点已保留', 'error');
+            return false;
+        }
+        if (vehicle.armed) {
+            pushNotification(
+                '任务清空失败',
+                '请先进入暂停模式并确认 PX4 上锁，本地航点已保留',
+                'warning'
+            );
+            return false;
+        }
+
+        const requestId = sendPacket('CMD_CLEAR_MISSION', {});
+        if (!requestId) return false;
+
+        clearMissionClearTimeout();
+        Object.assign(mission.clearOperation, {
+            phase: 'PENDING',
+            pendingRequestId: requestId,
+            error: null
+        });
+        missionClearTimeout = setTimeout(() => {
+            if (mission.clearOperation.pendingRequestId !== requestId) return;
+            mission.clearOperation.pendingRequestId = null;
+            mission.clearOperation.phase = 'ERROR';
+            mission.clearOperation.error = '清空请求超时，无法确认飞控任务状态';
+            pushNotification(
+                '任务清空超时',
+                '无法确认飞控清空结果，本地航点已保留',
+                'error'
+            );
+            missionClearTimeout = null;
+        }, MISSION_CLEAR_TIMEOUT_MS);
+        return true;
     }
 
     function requestInformationQuery(queryId = infoQuery.selectedId) {
@@ -1304,6 +1405,9 @@ export const useGcsStore = defineStore('gcs', () => {
     function triggerMapClear() {
         mapTriggers.clearMap = true;
         mission.plannedWaypoints = [];
+        mission.uploadedWaypoints = [];
+        mission.progress.current = 0;
+        mission.progress.total = 0;
         setTimeout(() => {
             mapTriggers.clearMap = false
         }, 100);
@@ -1414,6 +1518,7 @@ export const useGcsStore = defineStore('gcs', () => {
         requestLocked,
         sendManualControl,
         requestLeakReturn,
+        requestMissionClear,
         requestInformationQuery,
         requestWaypointAcceptanceRadius,
         setWaypointAcceptanceRadius,
