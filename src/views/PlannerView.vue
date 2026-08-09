@@ -72,10 +72,10 @@
 
               <div class="action-footer">
                 <button class="hud-btn primary" @click="handleUpload">
-                  <el-icon><Upload /></el-icon> 上传任务
+                  <el-icon><Upload /></el-icon> 发送任务到飞控
                 </button>
                 <button class="hud-btn primary" @click="handleDownload">
-                  <el-icon><Download /></el-icon> 下载任务
+                  <el-icon><Download /></el-icon> 从飞控读取任务
                 </button>
               </div>
 
