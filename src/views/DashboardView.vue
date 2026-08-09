@@ -342,6 +342,14 @@
               <div class="propulsion-rear-values">
                 <span>左后 <strong :class="propulsionDirectionClass(vehicle.propulsionFeedback.leftRear)">{{ formatPropulsionPercent(vehicle.propulsionFeedback.leftRear) }}</strong></span>
                 <span class="propulsion-value-divider">|</span>
+                <span
+                    class="propulsion-motion-state"
+                    :class="`is-${propulsionMotionState.key}`"
+                    :title="propulsionMotionState.label"
+                    role="status"
+                    :aria-label="`运动状态：${propulsionMotionState.label}`"
+                >{{ propulsionMotionState.symbol }}</span>
+                <span class="propulsion-value-divider">|</span>
                 <span>右后 <strong :class="propulsionDirectionClass(vehicle.propulsionFeedback.rightRear)">{{ formatPropulsionPercent(vehicle.propulsionFeedback.rightRear) }}</strong></span>
               </div>
               <div
@@ -801,6 +809,50 @@ const PROPULSION_STATUS_LABELS = Object.freeze({
   frontend_timeout: '数据超时',
   backend_disconnected: '后端断开',
   invalid: '数据异常'
+});
+
+const PROPULSION_INFERENCE_THRESHOLD = 0.2;
+const PROPULSION_MOTION_STATES = Object.freeze({
+  unknown: Object.freeze({key: 'unknown', symbol: '?', label: '状态未知'}),
+  stationary: Object.freeze({key: 'stationary', symbol: '●', label: '静止'}),
+  forward: Object.freeze({key: 'forward', symbol: '↑', label: '前进'}),
+  reverse: Object.freeze({key: 'reverse', symbol: '↓', label: '后退'}),
+  left: Object.freeze({key: 'left', symbol: '↶', label: '左转'}),
+  right: Object.freeze({key: 'right', symbol: '↷', label: '右转'}),
+  conflict: Object.freeze({key: 'conflict', symbol: '⚠', label: '矛盾'})
+});
+
+const propulsionMotionState = computed(() => {
+  const feedback = vehicle.value.propulsionFeedback;
+  const channels = [feedback.leftRear, feedback.rightRear, feedback.lateral];
+  const allChannelsValid = channels.every(
+      (channel) => channel?.valid && Number.isFinite(Number(channel.ratio))
+  );
+
+  if (!allChannelsValid) return PROPULSION_MOTION_STATES.unknown;
+
+  const leftRear = Number(feedback.leftRear.ratio);
+  const rightRear = Number(feedback.rightRear.ratio);
+  const lateral = Number(feedback.lateral.ratio);
+  const forwardComponent = (leftRear + rightRear) / 2;
+  const mainYawComponent = (leftRear - rightRear) / 2;
+  const mainYawActive = Math.abs(mainYawComponent) > PROPULSION_INFERENCE_THRESHOLD;
+  const lateralYawActive = Math.abs(lateral) > PROPULSION_INFERENCE_THRESHOLD;
+
+  if (mainYawActive && lateralYawActive && Math.sign(mainYawComponent) !== Math.sign(lateral)) {
+    return PROPULSION_MOTION_STATES.conflict;
+  }
+
+  if (mainYawActive || lateralYawActive) {
+    const yawDirection = mainYawActive ? mainYawComponent : lateral;
+    return yawDirection > 0
+        ? PROPULSION_MOTION_STATES.right
+        : PROPULSION_MOTION_STATES.left;
+  }
+
+  if (forwardComponent > PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.forward;
+  if (forwardComponent < -PROPULSION_INFERENCE_THRESHOLD) return PROPULSION_MOTION_STATES.reverse;
+  return PROPULSION_MOTION_STATES.stationary;
 });
 
 const formatPropulsionPercent = (channel) => {
@@ -1739,6 +1791,29 @@ onUnmounted(() => {
 
 .propulsion-value-divider {
   color: rgba(255, 255, 255, 0.22);
+}
+
+.propulsion-motion-state {
+  min-width: 12px;
+  color: #67c23a;
+  font-size: 13px;
+  line-height: 10px;
+  text-align: center;
+  transition: color 0.2s ease, text-shadow 0.2s ease;
+}
+
+.propulsion-motion-state.is-stationary {
+  color: #d7dbe0;
+  font-size: 9px;
+}
+
+.propulsion-motion-state.is-conflict {
+  color: #f56c6c;
+  text-shadow: 0 0 7px rgba(245, 108, 108, 0.45);
+}
+
+.propulsion-motion-state.is-unknown {
+  color: #777;
 }
 
 .propulsion-track {
