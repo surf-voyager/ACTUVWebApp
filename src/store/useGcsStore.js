@@ -8,6 +8,11 @@ import {
     waypointRadiusMatches,
     waypointRadiusQueryDisposition
 } from '../services/waypointAcceptanceRadius'
+import {
+    normalizeGeofencePoints,
+    parseDownloadedGeofence,
+    serializeGeofence
+} from '../services/geofence'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -95,9 +100,17 @@ export const useGcsStore = defineStore('gcs', () => {
             error: null
         }
     })
+
+    const geofence = reactive({
+        points: [],
+        source: 'LOCAL',
+        upload: {phase: 'IDLE', pendingRequestId: null, error: null},
+        download: {phase: 'IDLE', pendingRequestId: null, error: null},
+        clear: {phase: 'IDLE', pendingRequestId: null, error: null}
+    })
     
     // --- 3. 规划器状态 ---
-    const plannerMode = ref('manual'); // 'manual' | 'area'
+    const plannerMode = ref('manual'); // 'manual' | 'area' | 'geofence'
     const areaPoints = ref([]); // 区域规划的四个角点
 
     // --- 4. 交互触发器 ---
@@ -189,6 +202,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const LEAK_ALERT_LINGER_MS = 10000;
     const INFO_QUERY_TIMEOUT_MS = 6000;
     const MISSION_CLEAR_TIMEOUT_MS = 10000;
+    const GEOFENCE_OPERATION_TIMEOUT_MS = 15000;
     const PROPULSION_FEEDBACK_STALE_MS = 2000;
     const INFO_QUERY_ERROR_TEXT = {
         INVALID_REQUEST: '查询失败：请求格式错误',
@@ -220,6 +234,7 @@ export const useGcsStore = defineStore('gcs', () => {
     let waypointRadiusQueryTimeout = null;
     let waypointRadiusSetTimeout = null;
     let missionClearTimeout = null;
+    let geofenceOperationTimeout = null;
     let propulsionFeedbackWatchdogTimer = null;
     let requestSequence = 0;
 
@@ -315,6 +330,68 @@ export const useGcsStore = defineStore('gcs', () => {
             error: message
         });
         pushNotification('任务清空失败', message, 'error');
+    }
+
+    function clearGeofenceOperationTimeout() {
+        if (!geofenceOperationTimeout) return;
+        clearTimeout(geofenceOperationTimeout);
+        geofenceOperationTimeout = null;
+    }
+
+    function pendingGeofenceOperation() {
+        return ['upload', 'download', 'clear'].find(
+            operation => geofence[operation].phase === 'PENDING'
+        ) || null;
+    }
+
+    function failPendingGeofenceOperations(message) {
+        const pending = pendingGeofenceOperation();
+        if (!pending) return;
+        clearGeofenceOperationTimeout();
+        Object.assign(geofence[pending], {
+            phase: 'ERROR',
+            pendingRequestId: null,
+            error: message
+        });
+        pushNotification('地理围栏操作失败', `${message}，本地围栏已保留`, 'error');
+    }
+
+    function beginGeofenceOperation(operation, commandType, payload) {
+        if (pendingGeofenceOperation()) {
+            pushNotification('地理围栏', '已有围栏操作正在进行，请稍后重试', 'warning');
+            return false;
+        }
+        const requestId = sendPacket(commandType, payload);
+        if (!requestId) return false;
+        for (const name of ['upload', 'download', 'clear']) {
+            if (name === operation) continue;
+            Object.assign(geofence[name], {
+                phase: 'IDLE',
+                pendingRequestId: null,
+                error: null
+            });
+        }
+        Object.assign(geofence[operation], {
+            phase: 'PENDING',
+            pendingRequestId: requestId,
+            error: null
+        });
+        clearGeofenceOperationTimeout();
+        geofenceOperationTimeout = setTimeout(() => {
+            if (geofence[operation].pendingRequestId !== requestId) return;
+            Object.assign(geofence[operation], {
+                phase: 'ERROR',
+                pendingRequestId: null,
+                error: '请求超时，无法确认 PX4 围栏状态'
+            });
+            geofenceOperationTimeout = null;
+            pushNotification(
+                '地理围栏操作超时',
+                '无法确认 PX4 围栏状态，本地围栏已保留',
+                'error'
+            );
+        }, GEOFENCE_OPERATION_TIMEOUT_MS);
+        return true;
     }
 
     function clearWaypointAcceptanceRadius(reason = null) {
@@ -452,6 +529,7 @@ export const useGcsStore = defineStore('gcs', () => {
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             failPendingMissionClear('后端连接已断开，本地航点已保留');
+            failPendingGeofenceOperations('后端连接已断开');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             socket = null;
@@ -480,6 +558,7 @@ export const useGcsStore = defineStore('gcs', () => {
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             failPendingMissionClear('后端连接异常，本地航点已保留');
+            failPendingGeofenceOperations('后端连接异常');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
         };
@@ -508,6 +587,7 @@ export const useGcsStore = defineStore('gcs', () => {
         resetPropulsionFeedback('backend_disconnected');
         failPendingInfoQuery('BACKEND_DISCONNECTED');
         failPendingMissionClear('后端连接已断开，本地航点已保留');
+        failPendingGeofenceOperations('后端连接已断开');
         clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
     }
@@ -751,8 +831,13 @@ export const useGcsStore = defineStore('gcs', () => {
                 }
                 if (payload.gps) vehicle.gps = {sats: payload.gps.sat_count, fix: payload.gps.fix_type};
                 if (payload.health) Object.assign(vehicle.health, payload.health);
-                if (payload.home && payload.home.lat && payload.home.lon) {
-                    vehicle.home = payload.home;
+                if (payload.home) {
+                    const homeLat = Number(payload.home.lat);
+                    const homeLon = Number(payload.home.lon);
+                    if (Number.isFinite(homeLat) && Number.isFinite(homeLon)
+                        && Math.abs(homeLat) <= 90 && Math.abs(homeLon) <= 180) {
+                        vehicle.home = {...payload.home, lat: homeLat, lon: homeLon};
+                    }
                 }
                 if (payload.control_state) {
                     Object.assign(controlStatus, payload.control_state);
@@ -843,6 +928,53 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function handleAck(payload) {
         const {request_id, command_type, success, message} = payload;
+        const geofenceCommands = {
+            CMD_UPLOAD_GEOFENCE: 'upload',
+            CMD_DOWNLOAD_GEOFENCE: 'download',
+            CMD_CLEAR_GEOFENCE: 'clear'
+        };
+        const geofenceOperation = geofenceCommands[command_type];
+        if (geofenceOperation) {
+            const operation = geofence[geofenceOperation];
+            if (request_id !== operation.pendingRequestId) return;
+            clearGeofenceOperationTimeout();
+            operation.pendingRequestId = null;
+
+            if (!success) {
+                operation.phase = 'ERROR';
+                operation.error = message || 'PX4 地理围栏操作失败';
+                pushNotification('地理围栏操作失败', operation.error, 'error');
+                return;
+            }
+
+            if (geofenceOperation === 'download') {
+                try {
+                    geofence.points = parseDownloadedGeofence(payload.geofence);
+                    geofence.source = 'PX4';
+                } catch (error) {
+                    operation.phase = 'ERROR';
+                    operation.error = error?.message || '飞控返回的围栏数据无效';
+                    pushNotification('地理围栏读取失败', operation.error, 'error');
+                    return;
+                }
+            } else if (geofenceOperation === 'clear') {
+                geofence.points = [];
+                geofence.source = 'LOCAL';
+            } else {
+                geofence.source = 'PX4';
+            }
+            operation.phase = 'SUCCESS';
+            operation.error = null;
+            triggerRedraw();
+            pushNotification(
+                geofenceOperation === 'upload'
+                    ? '地理围栏已发送'
+                    : (geofenceOperation === 'download' ? '地理围栏已读取' : '地理围栏已清空'),
+                message || 'PX4 地理围栏操作成功',
+                'success'
+            );
+            return;
+        }
         if (command_type === 'CMD_SET_WAYPOINT_ACCEPTANCE_RADIUS'
             && request_id === waypointAcceptanceRadius.pendingSetRequestId) {
             if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
@@ -1086,6 +1218,73 @@ export const useGcsStore = defineStore('gcs', () => {
             missionClearTimeout = null;
         }, MISSION_CLEAR_TIMEOUT_MS);
         return true;
+    }
+
+    function setGeofencePoints(points, source = 'LOCAL') {
+        geofence.points = normalizeGeofencePoints(points);
+        geofence.source = source;
+        triggerRedraw();
+    }
+
+    function removeGeofencePoint(index) {
+        if (geofence.points.length <= 3) {
+            pushNotification('地理围栏', '多边形至少需要 3 个角点', 'warning');
+            return false;
+        }
+        if (!Number.isInteger(index) || index < 0 || index >= geofence.points.length) {
+            return false;
+        }
+        geofence.points.splice(index, 1);
+        geofence.source = 'LOCAL';
+        triggerRedraw();
+        return true;
+    }
+
+    function geofenceConnectionReady(operationName, {requireDisarmed = false} = {}) {
+        if (!isWsConnected.value) {
+            pushNotification(operationName, '后端未连接，本地围栏已保留', 'error');
+            return false;
+        }
+        if (!vehicle.connected) {
+            pushNotification(operationName, 'PX4 未连接，本地围栏已保留', 'error');
+            return false;
+        }
+        if (!requireDisarmed) return true;
+        if (!vehicle.armedKnown) {
+            pushNotification(operationName, 'PX4 解锁状态未知，本地围栏已保留', 'error');
+            return false;
+        }
+        if (vehicle.armed) {
+            pushNotification(operationName, 'PX4 已解锁，请先上锁再操作', 'warning');
+            return false;
+        }
+        return true;
+    }
+
+    function requestGeofenceUpload() {
+        if (!geofenceConnectionReady('地理围栏发送失败', {requireDisarmed: true})) {
+            return false;
+        }
+        let payload;
+        try {
+            payload = serializeGeofence(geofence.points);
+        } catch (error) {
+            pushNotification('地理围栏发送失败', error?.message || '本地围栏无效', 'error');
+            return false;
+        }
+        return beginGeofenceOperation('upload', 'CMD_UPLOAD_GEOFENCE', payload);
+    }
+
+    function requestGeofenceDownload() {
+        if (!geofenceConnectionReady('地理围栏读取失败')) return false;
+        return beginGeofenceOperation('download', 'CMD_DOWNLOAD_GEOFENCE', {});
+    }
+
+    function requestGeofenceClear() {
+        if (!geofenceConnectionReady('地理围栏清空失败', {requireDisarmed: true})) {
+            return false;
+        }
+        return beginGeofenceOperation('clear', 'CMD_CLEAR_GEOFENCE', {});
     }
 
     function requestInformationQuery(queryId = infoQuery.selectedId) {
@@ -1431,7 +1630,7 @@ export const useGcsStore = defineStore('gcs', () => {
     // --- 区域规划相关 ---
     function setPlannerMode(mode) {
         plannerMode.value = mode;
-        if (mode === 'manual') {
+        if (mode !== 'area') {
             clearAreaPoints();
         }
     }
@@ -1497,6 +1696,7 @@ export const useGcsStore = defineStore('gcs', () => {
     return {
         vehicle,
         mission,
+        geofence,
         mapTriggers,
         sysLogs,
         plannerMode,
@@ -1519,6 +1719,11 @@ export const useGcsStore = defineStore('gcs', () => {
         sendManualControl,
         requestLeakReturn,
         requestMissionClear,
+        setGeofencePoints,
+        removeGeofencePoint,
+        requestGeofenceUpload,
+        requestGeofenceDownload,
+        requestGeofenceClear,
         requestInformationQuery,
         requestWaypointAcceptanceRadius,
         setWaypointAcceptanceRadius,

@@ -157,6 +157,86 @@
             </div>
           </el-tab-pane>
 
+          <el-tab-pane label="地理围栏" name="geofence">
+            <div class="tab-content geofence-content">
+              <div class="geofence-summary">
+                <div>
+                  <span class="geofence-type-dot"></span>
+                  <span>包含型多边形</span>
+                </div>
+                <span>{{ geofence.points.length }} / {{ MAX_GEOFENCE_POINTS }} 个角点</span>
+              </div>
+
+              <div class="tools-header">
+                <span class="info-text">角点顺序固定，仅支持删除</span>
+                <el-button
+                  type="danger"
+                  link
+                  size="small"
+                  :loading="geofence.clear.phase === 'PENDING'"
+                  :disabled="geofenceOperationPending"
+                  @click="handleGeofenceClear"
+                >全部清空</el-button>
+              </div>
+
+              <el-table
+                :data="geofence.points"
+                height="280"
+                size="small"
+                class="hud-table geofence-table"
+                empty-text="请使用地图左侧多边形工具绘制"
+              >
+                <el-table-column label="#" width="34" align="center">
+                  <template #default="scope">
+                    <span class="seq-badge geofence-seq">{{ scope.$index + 1 }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="纬度" min-width="84" align="center">
+                  <template #default="scope">
+                    <span class="coordinate-text">{{ scope.row.latitude.toFixed(7) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="经度" min-width="88" align="center">
+                  <template #default="scope">
+                    <span class="coordinate-text">{{ scope.row.longitude.toFixed(7) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="" width="30" align="center">
+                  <template #default="scope">
+                    <el-icon
+                      class="delete-icon"
+                      :class="{ disabled: geofence.points.length <= 3 }"
+                      @click="handleRemoveGeofencePoint(scope.$index)"
+                    ><Close /></el-icon>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div class="geofence-status" :class="geofenceStatusClass">
+                {{ geofenceStatusText }}
+              </div>
+
+              <div class="action-footer geofence-actions">
+                <button
+                  class="hud-btn primary"
+                  :disabled="geofenceOperationPending || geofence.points.length < 3"
+                  @click="handleGeofenceUpload"
+                >
+                  <el-icon><Upload /></el-icon>
+                  {{ geofence.upload.phase === 'PENDING' ? '正在发送…' : '发送围栏到飞控' }}
+                </button>
+                <button
+                  class="hud-btn primary"
+                  :disabled="geofenceOperationPending"
+                  @click="handleGeofenceDownload"
+                >
+                  <el-icon><Download /></el-icon>
+                  {{ geofence.download.phase === 'PENDING' ? '正在读取…' : '从飞控读取地理围栏' }}
+                </button>
+              </div>
+            </div>
+          </el-tab-pane>
+
 
           <el-tab-pane label="地图" name="offline">
              <button class="hud-btn success" @click="handleSaveMap">
@@ -193,10 +273,17 @@ import {
   createMissionFileDocument,
   parseMissionFileDocument
 } from '../services/missionFile';
+import {
+  geofenceContainsHome,
+  MAX_GEOFENCE_POINTS,
+  normalizeGeofencePoints,
+  normalizeHomePosition
+} from '../services/geofence';
 
 const store = useGcsStore();
 const {
   mission,
+  geofence,
   vehicle,
   isWsConnected,
   infoQuery,
@@ -209,6 +296,34 @@ const tableRef = ref(null);
 const missionFileInputRef = ref(null);
 const acceptanceRadiusDraft = ref('');
 const MAX_MISSION_FILE_SIZE_BYTES = 1024 * 1024;
+const geofenceOperationPending = computed(() =>
+  ['upload', 'download', 'clear'].some(
+    operation => geofence.value[operation].phase === 'PENDING'
+  )
+);
+const geofenceStatusText = computed(() => {
+  const pending = ['upload', 'download', 'clear'].find(
+    operation => geofence.value[operation].phase === 'PENDING'
+  );
+  if (pending === 'upload') return '正在向 PX4 发送围栏…';
+  if (pending === 'download') return '正在从 PX4 读取围栏…';
+  if (pending === 'clear') return '正在清空 PX4 全部围栏…';
+  const failed = ['upload', 'download', 'clear'].find(
+    operation => geofence.value[operation].phase === 'ERROR'
+  );
+  if (failed) return geofence.value[failed].error || '上次围栏操作失败';
+  if (geofence.value.points.length === 0) return '尚未规划本地围栏';
+  return geofence.value.source === 'PX4'
+    ? '当前围栏已与 PX4 操作结果同步'
+    : '本地围栏尚未发送到 PX4';
+});
+const geofenceStatusClass = computed(() => {
+  if (geofenceOperationPending.value) return 'pending';
+  if (['upload', 'download', 'clear'].some(
+    operation => geofence.value[operation].phase === 'ERROR'
+  )) return 'error';
+  return geofence.value.source === 'PX4' ? 'success' : '';
+});
 
 const parsedAcceptanceRadius = computed(() => {
   if (acceptanceRadiusDraft.value === '') return null;
@@ -250,6 +365,112 @@ const handleSetAcceptanceRadius = () => {
   store.setWaypointAcceptanceRadius(parsedAcceptanceRadius.value);
 };
 
+const geofenceWriteBlockReason = () => {
+  if (!isWsConnected.value) return '后端未连接';
+  if (!vehicle.value.connected) return 'PX4 未连接';
+  if (!vehicle.value.armedKnown) return 'PX4 解锁状态未知';
+  if (vehicle.value.armed) return 'PX4 已解锁，请先上锁';
+  return '';
+};
+
+const handleRemoveGeofencePoint = (index) => {
+  store.removeGeofencePoint(index);
+};
+
+const handleGeofenceUpload = async () => {
+  const blocked = geofenceWriteBlockReason();
+  if (blocked) {
+    ElMessage.warning(blocked);
+    return;
+  }
+
+  let points;
+  try {
+    points = normalizeGeofencePoints(geofence.value.points);
+  } catch (error) {
+    ElMessage.error(error?.message || '本地地理围栏无效');
+    return;
+  }
+  if (vehicle.value.health.is_home_position_ok !== true) {
+    ElMessage.error('PX4 Home 点无效，禁止发送包含型围栏');
+    return;
+  }
+  const home = normalizeHomePosition(vehicle.value.home);
+  if (!home) {
+    ElMessage.error('未获得有效的 PX4 Home 坐标，禁止发送围栏');
+    return;
+  }
+  if (!geofenceContainsHome(points, home)) {
+    ElMessage.error('PX4 Home 点不在围栏内部或边界上，禁止发送');
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `将用当前 ${points.length} 个角点的包含型多边形覆盖 PX4 上所有既有围栏。`
+        + '该围栏会同时作用于地面控制和自动任务，确定继续吗？',
+      '覆盖飞控地理围栏',
+      {
+        confirmButtonText: '确认覆盖并发送',
+        cancelButtonText: '取消',
+        type: 'warning',
+        customClass: 'hud-message-box'
+      }
+    );
+  } catch (_) {
+    return;
+  }
+  store.requestGeofenceUpload();
+};
+
+const handleGeofenceDownload = async () => {
+  if (!isWsConnected.value || !vehicle.value.connected) {
+    ElMessage.warning(!isWsConnected.value ? '后端未连接' : 'PX4 未连接');
+    return;
+  }
+  if (geofence.value.points.length > 0) {
+    try {
+      await ElMessageBox.confirm(
+        '从 PX4 读取成功后将完整替换当前前端本地围栏，尚未发送的修改会丢失。',
+        '覆盖本地地理围栏',
+        {
+          confirmButtonText: '确认读取并覆盖',
+          cancelButtonText: '取消',
+          type: 'warning',
+          customClass: 'hud-message-box'
+        }
+      );
+    } catch (_) {
+      return;
+    }
+  }
+  store.requestGeofenceDownload();
+};
+
+const handleGeofenceClear = async () => {
+  const blocked = geofenceWriteBlockReason();
+  if (blocked) {
+    ElMessage.warning(blocked);
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      '此操作将清空 PX4 上所有类型的多边形和圆形围栏。'
+        + '仅在飞控确认成功后才清空前端本地围栏，且无法撤销。',
+      '清空全部地理围栏',
+      {
+        confirmButtonText: '确认永久清空',
+        cancelButtonText: '取消',
+        type: 'error',
+        customClass: 'hud-message-box'
+      }
+    );
+  } catch (_) {
+    return;
+  }
+  store.requestGeofenceClear();
+};
+
 const areaParams = reactive({
   horizontalSpacing: 20,
   verticalSpacing: 20,
@@ -262,13 +483,19 @@ watch(activeTab, (newTab) => {
     store.setPlannerMode('manual');
   } else if (newTab === 'area') {
     store.setPlannerMode('area');
+  } else if (newTab === 'geofence') {
+    store.setPlannerMode('geofence');
   }
 });
 
 // --- 拖拽排序初始化 ---
 onMounted(() => {
   // 初始化时，根据默认 tab 设置模式
-  store.setPlannerMode(activeTab.value === 'mission' ? 'manual' : 'area');
+  store.setPlannerMode(
+    activeTab.value === 'mission'
+      ? 'manual'
+      : (activeTab.value === 'area' ? 'area' : 'geofence')
+  );
 
   const tbody = document.querySelector('.draggable-table .el-table__body-wrapper tbody');
   if (tbody) {
@@ -524,8 +751,8 @@ function calculateSPath(points, params) {
 <style scoped>
 /* ... 之前的 Panel 样式保持不变 ... */
 .view-container { width: 100%; height: 100%; position: relative; pointer-events: none; overflow: hidden; }
-.planner-panel { pointer-events: auto; position: absolute; top: 80px; right: 0; width: 280px; max-height: 80%; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(12px); border-left: 1px solid rgba(255, 255, 255, 0.15); border-bottom: 1px solid rgba(255, 255, 255, 0.15); border-top-left-radius: 8px; border-bottom-left-radius: 8px; transition: transform 0.3s; display: flex; }
-.planner-panel.is-collapsed { transform: translateX(280px); }
+.planner-panel { pointer-events: auto; position: absolute; top: 80px; right: 0; width: 360px; max-height: 80%; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(12px); border-left: 1px solid rgba(255, 255, 255, 0.15); border-bottom: 1px solid rgba(255, 255, 255, 0.15); border-top-left-radius: 8px; border-bottom-left-radius: 8px; transition: transform 0.3s; display: flex; }
+.planner-panel.is-collapsed { transform: translateX(360px); }
 .toggle-btn { position: absolute; left: -24px; top: 50%; transform: translateY(-50%); width: 24px; height: 48px; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(12px); cursor: pointer; color: #ccc; display: flex; align-items: center; justify-content: center; border-radius: 4px 0 0 4px; }
 .panel-content-wrapper { width: 100%; padding: 10px 15px; }
 
@@ -585,6 +812,41 @@ function calculateSPath(points, params) {
 .file-action-footer { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1); }
 .mission-file-input { display: none; }
 .delete-icon { cursor: pointer; color: #f56c6c; }
+.delete-icon.disabled { cursor: not-allowed; color: #606266; opacity: 0.55; }
+.geofence-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(245, 166, 35, 0.35);
+  border-radius: 4px;
+  background: rgba(245, 166, 35, 0.09);
+  color: #ddd;
+  font-size: 11px;
+}
+.geofence-summary > div { display: flex; align-items: center; gap: 6px; }
+.geofence-type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f5a623;
+  box-shadow: 0 0 7px rgba(245, 166, 35, 0.75);
+}
+.geofence-seq { background: #f5a623; color: #201200; }
+.coordinate-text { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
+.geofence-status {
+  min-height: 16px;
+  padding-top: 6px;
+  color: #909399;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.geofence-status.pending { color: #e6a23c; }
+.geofence-status.success { color: #67c23a; }
+.geofence-status.error { color: #f56c6c; }
+.geofence-actions { display: flex; flex-direction: column; }
+.hud-btn:disabled { cursor: not-allowed; opacity: 0.48; }
 
 /* Tabs */
 :deep(.el-tabs__item) { color: #999; }

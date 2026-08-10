@@ -26,6 +26,7 @@ import boatIconImg from '../../assets/navigator-arrows.svg';
 import { useGcsStore } from '../../store/useGcsStore';
 import { storeToRefs } from 'pinia';
 import { useRoute } from 'vue-router';
+import {ElMessage, ElMessageBox} from 'element-plus';
 import {shouldRenderWaypointAcceptanceRadius} from '../../services/waypointAcceptanceRadius';
 
 const store = useGcsStore();
@@ -35,6 +36,7 @@ const {
   plannerMode,
   areaPoints,
   mission,
+  geofence,
   waypointAcceptanceRadius
 } = storeToRefs(store);
 
@@ -57,6 +59,7 @@ let boatLayerGroup = null;
 let missionLayerGroup = null;
 let trajectoryLayerGroup = null;
 let areaLayerGroup = null;
+let geofenceLayerGroup = null;
 let homeLayerGroup = null; // 新增：HOME点图层
 
 let boatMarker = null;
@@ -120,6 +123,9 @@ const initLayerGroups = () => {
   map.createPane('missionPane');
   map.getPane('missionPane').style.zIndex = 450;
 
+  map.createPane('geofencePane');
+  map.getPane('geofencePane').style.zIndex = 445;
+
   map.createPane('trajectoryPane');
   map.getPane('trajectoryPane').style.zIndex = 500;
 
@@ -131,6 +137,7 @@ const initLayerGroups = () => {
 
   // 初始化图层组并分配到对应的 pane
   areaLayerGroup = L.layerGroup({ pane: 'areaPane' }).addTo(map);
+  geofenceLayerGroup = L.layerGroup({ pane: 'geofencePane' }).addTo(map);
   missionLayerGroup = L.layerGroup({ pane: 'missionPane' }).addTo(map);
   trajectoryLayerGroup = L.layerGroup({ pane: 'trajectoryPane' }).addTo(map);
   boatLayerGroup = L.layerGroup({ pane: 'boatPane' }).addTo(map);
@@ -232,19 +239,48 @@ const initTrajectory = () => {
 
 const initGeoman = () => {
   map.pm.setLang('zh');
+  map.pm.setGlobalOptions({allowSelfIntersection: false});
   map.pm.addControls({
     position: 'topleft',
-    drawCircle: false, drawMarker: false, drawPolygon: false,
+    drawCircle: false, drawMarker: false, drawPolygon: true,
     drawPolyline: true, editMode: true, dragMode: true, removalMode: true
   });
   map.pm.toggleControls(false);
 
-  map.on('pm:create', (e) => {
-    if (plannerMode.value !== 'manual') return;
+  map.on('pm:create', async (e) => {
     const layer = e.layer;
-    const latlngs = layer.getLatLngs();
+    map.removeLayer(layer);
 
-    // 将新点附加到现有任务
+    if (e.shape === 'Polygon') {
+      const rings = layer.getLatLngs();
+      const points = Array.isArray(rings[0]) ? rings[0] : rings;
+      if (geofence.value.points.length > 0) {
+        try {
+          await ElMessageBox.confirm(
+            '新绘制的多边形将替换当前前端本地围栏，尚未发送的修改会丢失。',
+            '替换本地地理围栏',
+            {
+              confirmButtonText: '确认替换',
+              cancelButtonText: '取消',
+              type: 'warning',
+              customClass: 'hud-message-box'
+            }
+          );
+        } catch (_) {
+          return;
+        }
+      }
+      try {
+        store.setGeofencePoints(points, 'LOCAL');
+        ElMessage.success(`已绘制包含型地理围栏（${points.length} 个角点）`);
+      } catch (error) {
+        ElMessage.error(error?.message || '地理围栏无效');
+      }
+      return;
+    }
+
+    if (e.shape !== 'Line') return;
+    const latlngs = layer.getLatLngs();
     const startSeq = mission.value.plannedWaypoints.length;
     const newWaypoints = latlngs.map((pt, index) => ({
       seq: startSeq + index + 1,
@@ -254,8 +290,6 @@ const initGeoman = () => {
       loiter: mission.value.defaults.loiter,
     }));
     mission.value.plannedWaypoints.push(...newWaypoints);
-
-    map.removeLayer(layer);
     store.triggerRedraw();
   });
 };
@@ -404,6 +438,42 @@ const focusBoat = () => {
   }
 };
 
+const renderGeofenceFromStore = () => {
+  if (!map || !geofenceLayerGroup) return;
+  geofenceLayerGroup.clearLayers();
+  const points = geofence.value.points;
+  if (!Array.isArray(points) || points.length < 3) return;
+
+  const latlngs = points.map(point => [point.latitude, point.longitude]);
+  L.polygon(latlngs, {
+    pane: 'geofencePane',
+    color: '#f5a623',
+    weight: 3,
+    opacity: 0.95,
+    fillColor: '#f5a623',
+    fillOpacity: 0.13,
+    interactive: false,
+    pmIgnore: true
+  }).addTo(geofenceLayerGroup);
+
+  points.forEach((point, index) => {
+    const icon = L.divIcon({
+      className: 'map-geofence-icon',
+      html: `<span>${index + 1}</span>`,
+      iconSize: [26, 26],
+      iconAnchor: [13, 13]
+    });
+    L.marker([point.latitude, point.longitude], {
+      pane: 'geofencePane',
+      icon,
+      draggable: false,
+      interactive: false,
+      pmIgnore: true,
+      zIndexOffset: 500
+    }).addTo(geofenceLayerGroup);
+  });
+};
+
 defineExpose({ saveCurrentArea, focusBoat });
 
 // --- 监听器 ---
@@ -424,15 +494,23 @@ watch(() => vehicle.value.attitude.yaw, (newYaw) => {
   }
 });
 
-// 新增：监听HOME点变化
-watch(() => vehicle.value.home, (newHome) => {
-  if (homeMarker && newHome && newHome.lat && newHome.lon) {
-    homeMarker.setLatLng([newHome.lat, newHome.lon]);
-    homeMarker.setOpacity(1); // 设为可见
-  } else if (homeMarker) {
-    homeMarker.setOpacity(0); // 如果没有HOME点，设为不可见
-  }
-}, { deep: true, immediate: true });
+// 仅在 PX4 明确确认 Home 有效后显示，避免把默认 (0, 0) 当作真实 Home。
+watch(
+  () => [vehicle.value.home, vehicle.value.health.is_home_position_ok],
+  ([newHome, homePositionOk]) => {
+    const homeLat = Number(newHome?.lat);
+    const homeLon = Number(newHome?.lon);
+    if (homeMarker && homePositionOk === true
+        && Number.isFinite(homeLat) && Number.isFinite(homeLon)
+        && Math.abs(homeLat) <= 90 && Math.abs(homeLon) <= 180) {
+      homeMarker.setLatLng([homeLat, homeLon]);
+      homeMarker.setOpacity(1);
+    } else if (homeMarker) {
+      homeMarker.setOpacity(0);
+    }
+  },
+  {deep: true, immediate: true}
+);
 
 
 // --- 修改: 监听轨迹数据变化 ---
@@ -454,8 +532,15 @@ watch(() => mapTriggers.value.redrawMission, (val) => {
   if (val) {
     renderMissionFromStore();
     renderAreaSelection(); // 同时重绘区域
+    renderGeofenceFromStore();
   }
 });
+
+watch(
+  () => geofence.value.points,
+  () => renderGeofenceFromStore(),
+  {deep: true}
+);
 
 watch(
   () => [waypointAcceptanceRadius.value.queried, waypointAcceptanceRadius.value.valueM],
@@ -470,7 +555,7 @@ watch(() => mapTriggers.value.clearMap, (val) => {
 });
 
 watch(plannerMode, (newMode) => {
-  if (newMode === 'manual') {
+  if (newMode === 'manual' || newMode === 'geofence') {
     map.pm.toggleControls(true);
   } else {
     map.pm.toggleControls(false);
@@ -481,7 +566,8 @@ watch(plannerMode, (newMode) => {
 
 const handleModeChange = (pageName) => {
   if (!map) return;
-  if (pageName === 'planner' && plannerMode.value === 'manual') {
+  if (pageName === 'planner'
+      && (plannerMode.value === 'manual' || plannerMode.value === 'geofence')) {
     map.pm.toggleControls(true);
   } else {
     map.pm.toggleControls(false);
@@ -490,6 +576,7 @@ const handleModeChange = (pageName) => {
   // 切换页面时，重新渲染任务以更新拖动状态
   renderMissionFromStore();
   renderAreaSelection();
+  renderGeofenceFromStore();
 };
 </script>
 
@@ -578,6 +665,19 @@ const handleModeChange = (pageName) => {
   font-weight: 600;
   font-size: 14px;
   box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+
+.map-geofence-icon {
+  background-color: #f5a623;
+  border: 2px solid white;
+  border-radius: 50%;
+  color: #201200;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-weight: 800;
+  font-size: 12px;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.65);
 }
 
 /* 新增：HOME点图标样式 */
