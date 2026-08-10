@@ -218,7 +218,7 @@
     <aside class="side-panel right">
       <div class="panel-header">
         <div class="brand">日志信息</div>
-        <div class="status-chip">实时遥测</div>
+        <div class="status-chip online">实时遥测</div>
       </div>
 
       <div class="panel-scroll-content">
@@ -1703,6 +1703,11 @@ onUnmounted(() => {
   gap: 16px; /* 最小间距限制 */
 }
 
+/* 右侧日志区按内容顺序紧凑排列，避免运行日志被推到面板底部。 */
+.side-panel.right .panel-scroll-content {
+  justify-content: flex-start;
+}
+
 /* 确保在内容很少时，也能有一个最小高度支撑 space-between */
 .panel-scroll-content > :last-child {
   margin-bottom: 8px;
@@ -2007,14 +2012,10 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.4);
   border-radius: 10px;
   padding: 10px;
-  height: 220px;
+  height: 300px;
   overflow-y: auto;
   font-family: 'Roboto Mono', monospace;
   font-size: 12px;
-}
-
-.mini-terminal.messages {
-  height: 280px;
 }
 
 .log-line-flat {
