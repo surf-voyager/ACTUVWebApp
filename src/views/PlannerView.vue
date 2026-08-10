@@ -71,31 +71,31 @@
                 class="hud-table draggable-table"
                 empty-text="请在地图绘制"
               >
-                <el-table-column width="30" align="center">
+                <el-table-column width="36" align="center">
                   <template #default>
                     <el-icon class="drag-handle"><Grid /></el-icon>
                   </template>
                 </el-table-column>
 
-                <el-table-column label="#" prop="seq" width="35" align="center">
+                <el-table-column label="#" prop="seq" width="42" align="center">
                   <template #default="scope">
                     <span class="seq-badge">{{ scope.$index + 1 }}</span>
                   </template>
                 </el-table-column>
 
-                <el-table-column label="速度" width="75" align="center">
+                <el-table-column label="速度" min-width="90" align="center">
                   <template #default="scope">
                     <input type="number" class="hud-input" v-model.number="scope.row.speed" step="0.5" min="0">
                   </template>
                 </el-table-column>
 
-                <el-table-column label="停留" width="60" align="center">
+                <el-table-column label="停留" min-width="90" align="center">
                   <template #default="scope">
                     <input type="number" class="hud-input" v-model.number="scope.row.loiter" min="0">
                   </template>
                 </el-table-column>
 
-                <el-table-column label="操作" width="40" align="center">
+                <el-table-column label="操作" width="56" align="center">
                   <template #default="scope">
                      <el-icon class="delete-icon" @click="confirmRemove(scope.$index)"><Close /></el-icon>
                   </template>
@@ -103,7 +103,11 @@
               </el-table>
 
               <div class="action-footer">
-                <button class="hud-btn primary" @click="handleUpload">
+                <button
+                  class="hud-btn primary"
+                  :disabled="mission.plannedWaypoints.length === 0"
+                  @click="handleUpload"
+                >
                   <el-icon><Upload /></el-icon> 发送任务到飞控
                 </button>
                 <button class="hud-btn primary" @click="handleDownload">

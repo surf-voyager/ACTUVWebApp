@@ -1,6 +1,17 @@
 <template>
   <div id="map-container"></div>
 
+  <div v-if="waypointDragInfo.visible" class="waypoint-drag-info">
+    <span class="waypoint-drag-title">航点 {{ waypointDragInfo.number }}</span>
+    <span class="waypoint-drag-item">
+      距上一航点 <strong>{{ formattedWaypointDistance }}</strong>
+    </span>
+    <span class="waypoint-drag-divider"></span>
+    <span class="waypoint-drag-item">
+      方位 <strong>{{ waypointDragInfo.bearingDeg.toFixed(1) }}°</strong>
+    </span>
+  </div>
+
   <div
     v-if="downloadState !== 'idle'"
     class="download-status"
@@ -85,6 +96,18 @@ const savedTiles = ref(0);
 const failedTiles = ref(0);
 const downloadState = ref('idle');
 const downloadError = ref('');
+const waypointDragInfo = ref({
+  visible: false,
+  number: 0,
+  distanceM: 0,
+  bearingDeg: 0
+});
+const formattedWaypointDistance = computed(() => {
+  const distanceM = waypointDragInfo.value.distanceM;
+  return distanceM >= 1000
+    ? `${(distanceM / 1000).toFixed(2)} km`
+    : `${distanceM.toFixed(1)} m`;
+});
 const downloadTitle = computed(() => ({
   downloading: '正在下载当前视野',
   success: '当前视野下载完成',
@@ -111,6 +134,8 @@ const downloadDetail = computed(() => {
 // --- 生命周期 ---
 onMounted(() => {
   initMap();
+  document.addEventListener('mouseup', hideWaypointDragInfo);
+  document.addEventListener('touchend', hideWaypointDragInfo);
   watch(() => route.name, (newRouteName) => {
     handleModeChange(newRouteName);
   }, { immediate: true });
@@ -118,8 +143,39 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+  document.removeEventListener('mouseup', hideWaypointDragInfo);
+  document.removeEventListener('touchend', hideWaypointDragInfo);
   if (map) map.remove();
 });
+
+const calculateBearingDeg = (from, to) => {
+  const toRad = value => value * Math.PI / 180;
+  const lat1 = toRad(from.lat);
+  const lat2 = toRad(to.lat);
+  const deltaLng = toRad(to.lng - from.lng);
+  const y = Math.sin(deltaLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2)
+    - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+};
+
+const updateWaypointDragInfo = (index, currentPosition, routeLatLngs) => {
+  if (index === 0) {
+    hideWaypointDragInfo();
+    return;
+  }
+  const previousPosition = L.latLng(routeLatLngs[index - 1]);
+  waypointDragInfo.value = {
+    visible: true,
+    number: index + 1,
+    distanceM: previousPosition.distanceTo(currentPosition),
+    bearingDeg: calculateBearingDeg(previousPosition, currentPosition)
+  };
+};
+
+function hideWaypointDragInfo() {
+  waypointDragInfo.value.visible = false;
+}
 
 // --- 初始化地图 ---
 const initMap = () => {
@@ -325,11 +381,12 @@ const renderMissionFromStore = () => {
   const waypoints = store.mission.plannedWaypoints;
   if (!waypoints || waypoints.length === 0) return;
   const latlngs = waypoints.map(p => [p.lat, p.lng]);
+  const acceptanceRadiusCircles = [];
 
   const acceptanceRadiusM = Number(waypointAcceptanceRadius.value.valueM);
   if (shouldRenderWaypointAcceptanceRadius(waypointAcceptanceRadius.value)) {
     waypoints.forEach((pt) => {
-      L.circle([pt.lat, pt.lng], {
+      const circle = L.circle([pt.lat, pt.lng], {
         radius: acceptanceRadiusM,
         color: '#f5c542',
         weight: 2,
@@ -338,13 +395,14 @@ const renderMissionFromStore = () => {
         dashArray: '6, 7',
         interactive: false,
       }).addTo(missionLayerGroup);
+      acceptanceRadiusCircles.push(circle);
     });
   }
 
-  L.polyline(latlngs, {
+  const missionOutline = L.polyline(latlngs, {
     color: 'white', weight: 6, opacity: 0.9, lineJoin: 'round'
   }).addTo(missionLayerGroup);
-  L.polyline(latlngs, {
+  const missionRoute = L.polyline(latlngs, {
     color: '#409EFF', weight: 3, opacity: 1, lineJoin: 'round'
   }).addTo(missionLayerGroup);
 
@@ -365,10 +423,25 @@ const renderMissionFromStore = () => {
     }).addTo(missionLayerGroup);
 
     if (isPlannerPage) {
+      marker.on('mousedown', (e) => {
+        updateWaypointDragInfo(index, e.target.getLatLng(), latlngs);
+      });
+      marker.on('dragstart', (e) => {
+        updateWaypointDragInfo(index, e.target.getLatLng(), latlngs);
+      });
+      marker.on('drag', (e) => {
+        const newPos = e.target.getLatLng();
+        latlngs[index] = newPos;
+        missionOutline.setLatLngs(latlngs);
+        missionRoute.setLatLngs(latlngs);
+        acceptanceRadiusCircles[index]?.setLatLng(newPos);
+        updateWaypointDragInfo(index, newPos, latlngs);
+      });
       marker.on('dragend', (e) => {
         const newPos = e.target.getLatLng();
         store.mission.plannedWaypoints[index].lat = newPos.lat;
         store.mission.plannedWaypoints[index].lng = newPos.lng;
+        hideWaypointDragInfo();
         store.triggerRedraw();
       });
     }
@@ -688,6 +761,53 @@ const handleModeChange = (pageName) => {
   z-index: 1;
 }
 
+.waypoint-drag-info {
+  position: absolute;
+  top: 94px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 360px;
+  box-sizing: border-box;
+  padding: 11px 18px;
+  border: 1px solid rgba(116, 186, 255, 0.72);
+  border-radius: 12px;
+  background: rgba(22, 91, 166, 0.78);
+  box-shadow: 0 8px 22px rgba(0, 32, 72, 0.42);
+  backdrop-filter: blur(8px);
+  color: #d9ecff;
+  pointer-events: none;
+}
+
+.waypoint-drag-title {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.waypoint-drag-item {
+  color: #b9d8f7;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.waypoint-drag-item strong {
+  margin-left: 4px;
+  color: #fff;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.waypoint-drag-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(199, 226, 255, 0.35);
+}
+
 .download-status {
   position: absolute;
   bottom: 88px;
@@ -757,12 +877,12 @@ const handleModeChange = (pageName) => {
   font-family: Arial, sans-serif;
   box-shadow: 0 3px 8px rgba(0,0,0,0.6);
   box-sizing: border-box;
-  transition: transform 0.2s;
+  transition: background-color 0.2s, box-shadow 0.2s;
 }
 
 .map-seq-icon:hover {
-  transform: scale(1.1);
   background-color: #66b1ff;
+  box-shadow: 0 4px 10px rgba(64, 158, 255, 0.8);
 }
 
 .map-corner-icon {
