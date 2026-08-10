@@ -1,0 +1,78 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  formatCommandAck,
+  localizeBackendError,
+  NOTIFICATION_TITLES,
+  summarizeMissionSync
+} from '../src/services/systemNotifications.js';
+
+test('automatic connection and mission download successes stay silent', () => {
+  assert.equal(formatCommandAck({commandType: 'CMD_CONNECT_VEHICLE', success: true}), null);
+  assert.equal(formatCommandAck({commandType: 'CMD_DOWNLOAD_MISSION', success: true}), null);
+});
+
+test('raw English backend errors do not leak into system notifications', () => {
+  assert.equal(localizeBackendError('Command denied', '飞控拒绝执行'), '飞控拒绝执行');
+  assert.equal(localizeBackendError('返航失败：COMMAND_DENIED', '返航失败'), '返航失败');
+  assert.equal(localizeBackendError('飞控拒绝执行', '操作失败'), '飞控拒绝执行');
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_ARM',
+    success: false,
+    message: 'COMMAND_DENIED'
+  }), {
+    title: NOTIFICATION_TITLES.groundControl,
+    message: '飞控解锁失败',
+    type: 'error'
+  });
+});
+
+test('command acknowledgements use business-specific Chinese copy', () => {
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_UPLOAD_MISSION',
+    success: true,
+    requestPayload: {mission_items: [{}, {}]}
+  }), {
+    title: NOTIFICATION_TITLES.mission,
+    message: '飞控已确认接收 2 个航点',
+    type: 'success'
+  });
+
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_SET_MODE',
+    success: true,
+    requestPayload: {mode: 'MISSION'}
+  }), {
+    title: NOTIFICATION_TITLES.groundControl,
+    message: '飞控已切换至任务模式（MISSION）',
+    type: 'success'
+  });
+});
+
+test('failed acknowledgements preserve actionable backend details', () => {
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_SET_HOME',
+    success: false,
+    message: '返航点超出有效范围'
+  }), {
+    title: NOTIFICATION_TITLES.returnHome,
+    message: '返航点超出有效范围',
+    type: 'error'
+  });
+});
+
+test('mission synchronization reports received and valid item counts once', () => {
+  assert.deepEqual(summarizeMissionSync(0, 0), {
+    message: '飞控中没有任务航点',
+    type: 'info'
+  });
+  assert.deepEqual(summarizeMissionSync(1, 0), {
+    message: '收到 1 个任务项，但未发现有效航点',
+    type: 'warning'
+  });
+  assert.deepEqual(summarizeMissionSync(3, 2), {
+    message: '已加载 2 个有效航点，忽略 1 个无效任务项',
+    type: 'warning'
+  });
+});

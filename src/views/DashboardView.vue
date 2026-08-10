@@ -198,20 +198,19 @@
       </div>
 
       <div class="panel-scroll-content">
-        <!-- 日志透传 -->
-        <!-- 消息透传 (原 Notification 内容) -->
+        <!-- 系统通知（原 Notification 内容） -->
         <section class="panel-section messages-section">
           <div class="section-header">
             <el-icon>
               <Bell/>
             </el-icon>
-            <span>消息透传</span>
+            <span>系统通知</span>
           </div>
           <div class="mini-terminal messages">
-            <div v-if="notificationLogs.length === 0" class="empty-log">暂无系统消息</div>
+            <div v-if="notificationLogs.length === 0" class="empty-log">暂无系统通知</div>
             <div v-for="msg in notificationLogs" :key="msg.id" class="log-line-flat" :class="msg.type">
               <span class="log-time">{{ msg.time }}</span>
-              <span class="log-text">[{{ msg.title }}]{{ msg.message }}</span>
+              <span class="log-text">[{{ msg.title }}]{{ msg.message }}<template v-if="msg.count > 1">（重复 {{ msg.count }} 次）</template></span>
             </div>
           </div>
         </section>
@@ -220,7 +219,7 @@
             <el-icon>
               <Document/>
             </el-icon>
-            <span>日志透传</span>
+            <span>运行日志</span>
           </div>
           <div class="mini-terminal">
             <div v-if="sysLogs.length === 0" class="empty-log">暂无日志</div>
@@ -641,11 +640,12 @@ import {
   VideoPause,
   VideoPlay
 } from '@element-plus/icons-vue';
-import {ElMessageBox} from 'element-plus';
+import {ElMessage, ElMessageBox} from 'element-plus';
 import {
   MISSION_HOLD_DISPOSITION,
   missionHoldDisposition
 } from '../services/missionCompletion';
+import {NOTIFICATION_TITLES} from '../services/systemNotifications';
 
 const store = useGcsStore();
 const {
@@ -698,7 +698,6 @@ const openWsDialog = () => {
 const confirmWsChange = () => {
   store.changeWsUrl(wsDialog.value.newAddress);
   wsDialog.value.visible = false;
-  store.pushNotification('系统消息', '正在更新连接地址...', 'success');
 };
 
 const ntripEndpoint = computed(() => {
@@ -847,17 +846,33 @@ const handleInfoQuery = () => {
 
 // --- 自动重连逻辑 ---
 let reconnectTimer = null;
-watch(() => vehicle.value.connected, (connected) => {
+watch(() => vehicle.value.connected, (connected, wasConnected) => {
   if (!connected) {
     if (!reconnectTimer) {
-      reconnectTimer = setInterval(() => store.sendPacket('CMD_CONNECT_VEHICLE'), 3000);
+      reconnectTimer = setInterval(
+          () => store.sendPacket('CMD_CONNECT_VEHICLE', {}, {silent: true}),
+          3000
+      );
+    }
+    if (wasConnected === true) {
+      store.pushNotification(
+          NOTIFICATION_TITLES.flightController,
+          '连接已断开，正在等待重连',
+          'warning',
+          {key: 'connection:flight-controller', incrementCount: false}
+      );
     }
   } else {
     if (reconnectTimer) {
       clearInterval(reconnectTimer);
       reconnectTimer = null;
-      store.pushNotification('连接成功', '飞控已建立连接', 'success');
     }
+    store.pushNotification(
+        NOTIFICATION_TITLES.flightController,
+        '连接成功',
+        'success',
+        {key: 'connection:flight-controller', incrementCount: false}
+    );
     store.sendPacket("CMD_DOWNLOAD_MISSION", {});
     store.mapTriggers.centerMap = true;
     if (vehicle.value.mode === 'MISSION') {
@@ -1119,24 +1134,29 @@ const changeMode = (mode, payload_extra = {}) => {
 
   if (mode === 'MISSION') {
     if (mission.value.plannedWaypoints.length === 0) {
-      store.pushNotification('操作提示', '无任务航点，无法开始', 'warning');
+      store.pushNotification(NOTIFICATION_TITLES.mission, '没有可执行的任务航点', 'warning');
       return;
     }
     let defaultStart = (mission.value.progress.current >= 0) ? mission.value.progress.current + 1 : 1;
     missionStartDialog.value.startIndex = defaultStart;
     missionStartDialog.value.visible = true;
   } else {
-    executeChangeMode(mode, payload_extra);
+    executeChangeMode(mode, payload_extra, {
+      pendingNotification: {
+        title: NOTIFICATION_TITLES.groundControl,
+        message: '正在请求切换飞控模式…'
+      }
+    });
   }
 };
 
 const handleReturnHome = async () => {
   if (!isWsConnected.value) {
-    store.pushNotification('返航失败', '后端通信已断开，无法执行返航', 'error');
+    store.pushNotification(NOTIFICATION_TITLES.returnHome, '机载服务通信已断开，无法执行返航', 'error');
     return;
   }
   if (!vehicle.value.connected) {
-    store.pushNotification('返航失败', 'PX4 未连接，无法执行返航', 'error');
+    store.pushNotification(NOTIFICATION_TITLES.returnHome, '飞控未连接，无法执行返航', 'error');
     return;
   }
 
@@ -1158,14 +1178,12 @@ const handleReturnHome = async () => {
   // 立即停止界面摇杆输出；后端在同一返航事务中退出手操、解锁并进入 RTL。
   stopManualControlLoop();
   controlState.value = {throttle: 0.0, steering: 0.0};
-  const requestId = store.sendPacket('CMD_RETURN_HOME', {});
-  if (requestId) {
-    store.pushNotification(
-        '前往返航点',
-        '正在校验返航点并请求后端自动解锁、进入返航模式',
-        'info'
-    );
-  }
+  store.sendPacket('CMD_RETURN_HOME', {}, {
+    pendingNotification: {
+      title: NOTIFICATION_TITLES.returnHome,
+      message: '正在校验返航点并请求自动解锁和返航…'
+    }
+  });
 };
 
 const handleGroundControlToggle = () => {
@@ -1174,34 +1192,64 @@ const handleGroundControlToggle = () => {
   if (controlStatus.value.state === 'manual') {
     stopManualControlLoop();
     controlState.value = {throttle: 0.0, steering: 0.0};
-    store.requestLocked();
-    store.pushNotification('地面控制', '正在归零并请求后端上锁', 'info');
+    if (!store.requestLocked()) return;
+    store.pushNotification(
+        NOTIFICATION_TITLES.groundControl,
+        '正在归零并请求飞控上锁…',
+        'info',
+        {key: 'ground-control:state', incrementCount: false}
+    );
     return;
   }
 
-  store.requestManual();
-  store.pushNotification('地面控制', '正在请求后端进入 MANUAL 并解锁', 'info');
+  if (!store.requestManual()) return;
+  store.pushNotification(
+      NOTIFICATION_TITLES.groundControl,
+      '正在请求进入手动模式并解锁…',
+      'info',
+      {key: 'ground-control:state', incrementCount: false}
+  );
 };
 
 const handlePause = () => {
-  store.requestLocked();
+  if (!store.requestLocked()) return;
   store.setRelay(0);
-  store.pushNotification('暂停模式', '正在归零、上锁并关闭混合器', 'warning');
+  store.pushNotification(
+      NOTIFICATION_TITLES.groundControl,
+      '正在归零、上锁并关闭混合器…',
+      'warning',
+      {key: 'ground-control:state', incrementCount: false}
+  );
 };
 
 const handleSystemStop = () => {
   store.setRelay(0);
-  store.requestLocked();
-  store.pushNotification('系统停机', '正在关闭混合器并请求后端安全上锁', 'error');
+  if (!store.requestLocked()) return;
+  store.pushNotification(
+      NOTIFICATION_TITLES.system,
+      '正在关闭混合器并请求飞控安全上锁…',
+      'warning',
+      {key: 'ground-control:state', incrementCount: false}
+  );
 };
 
 const confirmMissionStart = () => {
   const targetIndex = missionStartDialog.value.startIndex - 1;
-  executeChangeMode('MISSION', {mission_item_index: targetIndex});
+  const requestId = executeChangeMode('MISSION', {mission_item_index: targetIndex}, {
+    pendingNotification: {
+      title: NOTIFICATION_TITLES.mission,
+      message: `正在从第 ${missionStartDialog.value.startIndex} 个航点启动任务…`
+    },
+    successNotification: {
+      title: NOTIFICATION_TITLES.mission,
+      message: `飞控已确认从第 ${missionStartDialog.value.startIndex} 个航点启动任务`
+    },
+    failureTitle: NOTIFICATION_TITLES.mission
+  });
+  if (!requestId) return;
   missionStartDialog.value.visible = false;
-  store.pushNotification('任务启动', `自动巡航任务已从第 ${missionStartDialog.value.startIndex} 航点开始`, 'success');
   if (!vehicle.value.armed) {
-    sendArmCommand('ARM', false);
+    sendArmCommand('ARM', false, {silentSuccess: true});
   }
 
   // 记录启动信息
@@ -1209,9 +1257,10 @@ const confirmMissionStart = () => {
   lastTargetIndex.value = targetIndex;
 };
 
-const executeChangeMode = (mode, payload_extra) => {
+const executeChangeMode = (mode, payload_extra = {}, notificationOptions = {}) => {
   let payload = {mode: mode, ...payload_extra};
-  store.sendPacket('CMD_SET_MODE', payload);
+  const requestId = store.sendPacket('CMD_SET_MODE', payload, notificationOptions);
+  if (!requestId) return null;
   if (mode === 'MISSION') {
     if (missionHoldTimer) {
       clearTimeout(missionHoldTimer);
@@ -1224,6 +1273,7 @@ const executeChangeMode = (mode, payload_extra) => {
     missionState.value = 'EXECUTING';
     setTimeout(() => store.setRelay(1), 2000);
   }
+  return requestId;
 }
 
 const clearMissionHoldTimer = () => {
@@ -1237,8 +1287,8 @@ const markMissionCompleted = () => {
   clearMissionHoldTimer();
   missionState.value = 'COMPLETED';
   store.pushNotification(
-      '任务完成',
-      '已完成最后一个航点，PX4 已进入 HOLD',
+      NOTIFICATION_TITLES.mission,
+      '已完成最后一个航点，飞控已进入保持模式（HOLD）',
       'success'
   );
 };
@@ -1265,15 +1315,15 @@ watch(() => vehicle.value.mode, (newMode) => {
     }
     if (disposition !== MISSION_HOLD_DISPOSITION.RECOVER) return;
 
-    store.pushNotification('自动恢复', '检测到任务意外中断，正在尝试重新执行...', 'warning');
+    store.pushNotification(NOTIFICATION_TITLES.mission, '检测到任务意外中断，正在尝试恢复…', 'warning');
     const targetIndex = lastTargetIndex.value;
-    store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex});
+    store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex}, {silentSuccess: true});
 
     setTimeout(() => {
       if (!vehicle.value.armed) {
-        sendArmCommand('ARM', false);
+        sendArmCommand('ARM', false, {silentSuccess: true});
       }
-      store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'});
+      store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'}, {silentSuccess: true});
     }, 500);
   }, MISSION_HOLD_SETTLE_MS);
 });
@@ -1305,15 +1355,24 @@ const jumpToWaypoint = () => {
       type: 'warning'
     }).then(() => {
       const targetIndex = manualWaypointIndex.value - 1;
-      executeChangeMode('MISSION', {mission_item_index: targetIndex});
-      store.pushNotification('指令发送', `已请求跳转到航点 ${manualWaypointIndex.value}`, 'success');
+      executeChangeMode('MISSION', {mission_item_index: targetIndex}, {
+        pendingNotification: {
+          title: NOTIFICATION_TITLES.mission,
+          message: `正在请求跳转到第 ${manualWaypointIndex.value} 个航点…`
+        },
+        successNotification: {
+          title: NOTIFICATION_TITLES.mission,
+          message: `飞控已确认跳转到第 ${manualWaypointIndex.value} 个航点`
+        },
+        failureTitle: NOTIFICATION_TITLES.mission
+      });
     });
   }
 };
 
 const handleCenterMap = () => {
   store.mapTriggers.centerMap = true;
-  store.pushNotification('地图工具', '已将视角定位至无人艇', 'info');
+  ElMessage.success('已将视角定位至无人艇');
 };
 
 const handleSaveMap = () => {
@@ -1321,8 +1380,12 @@ const handleSaveMap = () => {
 };
 
 const handleThresholdChange = (val) => {
-  store.sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: val});
-  store.pushNotification('电池设置', `已发送低电量阈值设定: ${val}%`, 'info');
+  store.sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: val}, {
+    pendingNotification: {
+      title: NOTIFICATION_TITLES.parameter,
+      message: `正在设置低电量阈值为 ${val}%…`
+    }
+  });
 };
 
 // 修复：HUD 鼠标滚轮横向滚动
@@ -1344,13 +1407,21 @@ const controlMission = (action) => {
     lastMissionStartTime.value = Date.now();
     lastTargetIndex.value = targetIndex;
 
-    store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex});
+    store.sendPacket(
+        'CMD_MISSION_CONTROL',
+        {action: 'SET_INDEX', index: targetIndex},
+        {silentSuccess: true}
+    );
     // 稍作延迟发送继续指令，确保索引设置生效
     setTimeout(() => {
-      store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'});
+      store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'}, {
+        pendingNotification: {
+          title: NOTIFICATION_TITLES.mission,
+          message: `正在从第 ${targetIndex + 1} 个航点恢复任务…`
+        }
+      });
       missionState.value = 'EXECUTING';
-      store.pushNotification('任务恢复', `已解锁电机并从第 ${targetIndex + 1} 航点恢复任务`, 'success');
-      sendArmCommand('ARM', false);
+      sendArmCommand('ARM', false, {silentSuccess: true});
     }, 200);
     setTimeout(() => {
       store.setRelay(1);
@@ -1359,9 +1430,19 @@ const controlMission = (action) => {
     return;
   } else if (action === 'PAUSE') {
     missionState.value = 'PAUSED';
-    sendArmCommand("DISARM", false);
+    sendArmCommand("DISARM", false, {
+      pendingNotification: {
+        title: NOTIFICATION_TITLES.mission,
+        message: '正在暂停任务并上锁飞控…',
+        type: 'warning'
+      },
+      successNotification: {
+        title: NOTIFICATION_TITLES.mission,
+        message: '任务已暂停，飞控已确认上锁'
+      },
+      failureTitle: NOTIFICATION_TITLES.mission
+    });
     store.setRelay(0);
-    store.pushNotification('任务暂停', '任务已暂停，电机已上锁', 'warning');
 
     // 启动3秒冷却
     resumeCooldown.value = 3;
@@ -1378,15 +1459,25 @@ const controlMission = (action) => {
 
 const cancelMission = () => {
   ElMessageBox.confirm('确定要终止任务吗？', '终止任务', {type: 'warning'}).then(() => {
-    sendArmCommand("DISARM", false);
-    store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESET'});
-    changeMode('HOLD');
+    sendArmCommand("DISARM", false, {
+      pendingNotification: {
+        title: NOTIFICATION_TITLES.mission,
+        message: '正在终止任务并上锁飞控…',
+        type: 'warning'
+      },
+      successNotification: {
+        title: NOTIFICATION_TITLES.mission,
+        message: '任务已终止，飞控已确认上锁'
+      },
+      failureTitle: NOTIFICATION_TITLES.mission
+    });
+    store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESET'}, {silentSuccess: true});
+    executeChangeMode('HOLD', {}, {silentSuccess: true});
     store.setRelay(0);
-    store.pushNotification('任务终止', '任务已取消，电机已上锁', 'warning');
   });
 };
 
-const sendArmCommand = (action, force) => {
+const sendArmCommand = (action, force, notificationOptions = {}) => {
   const isArming = (action === 'ARM');
   // 如果当前状态已经是请求的状态，且不是强制操作，则不执行
   if (!force && vehicle.value.armed === isArming) return;
@@ -1394,12 +1485,29 @@ const sendArmCommand = (action, force) => {
   const cmd = isArming ? 'CMD_ARM' : 'CMD_DISARM';
   if (force) {
     ElMessageBox.confirm('确定要强制操作吗？极其危险！', '危险操作', {type: 'error'}).then(() => {
-      store.sendPacket(cmd, {force: true});
-      store.pushNotification('危险操作', `已强制发送 ${action} 指令`, 'error');
+      store.sendPacket(cmd, {force: true}, {
+        pendingNotification: {
+          title: NOTIFICATION_TITLES.safety,
+          message: `正在请求强制${isArming ? '解锁' : '上锁'}…`,
+          type: 'warning'
+        },
+        failureTitle: NOTIFICATION_TITLES.safety,
+        ...notificationOptions
+      });
     });
   } else {
-    store.sendPacket(cmd, {force: false});
-    store.pushNotification('电机控制', `已发送 ${action === 'ARM' ? '解锁' : '上锁'} 指令`, 'info');
+    const defaultNotification = notificationOptions.silentSuccess
+        ? {}
+        : {
+          pendingNotification: {
+            title: NOTIFICATION_TITLES.groundControl,
+            message: `正在请求飞控${isArming ? '解锁' : '上锁'}…`
+          }
+        };
+    store.sendPacket(cmd, {force: false}, {
+      ...defaultNotification,
+      ...notificationOptions
+    });
   }
 };
 
@@ -1411,13 +1519,17 @@ const confirmGoto = () => {
   if (String(rawLat).trim() === '' || String(rawLon).trim() === ''
       || !Number.isFinite(lat) || lat < -90 || lat > 90
       || !Number.isFinite(lon) || lon < -180 || lon > 180) {
-    store.pushNotification('返航点设定', '请输入有效的经纬度', 'warning');
+    store.pushNotification(NOTIFICATION_TITLES.returnHome, '请输入有效的经纬度', 'warning');
     return;
   }
 
-  store.sendPacket('CMD_SET_HOME', {lat, lon, alt: 0});
+  store.sendPacket('CMD_SET_HOME', {lat, lon, alt: 0}, {
+    pendingNotification: {
+      title: NOTIFICATION_TITLES.returnHome,
+      message: '正在更新返航点…'
+    }
+  });
   gotoDialog.value.visible = false;
-  store.pushNotification('返航点设定', '已发送返航点设定指令', 'success');
 };
 
 // --- 摇杆逻辑 ---
@@ -1800,7 +1912,7 @@ onUnmounted(() => {
   color: #e6a23c;
 }
 
-/* 消息透传颜色 */
+/* 系统通知颜色 */
 .msg-success .log-text {
   color: #67c23a;
 }

@@ -290,6 +290,7 @@ import {
   normalizeGeofencePoints,
   normalizeHomePosition
 } from '../services/geofence';
+import {NOTIFICATION_TITLES} from '../services/systemNotifications';
 
 const store = useGcsStore();
 const {
@@ -582,15 +583,12 @@ const handleUpload = () => {
   // 2. 发送指令
   store.sendPacket("CMD_UPLOAD_MISSION", {
     mission_items: missionItems
+  }, {
+    pendingNotification: {
+      title: NOTIFICATION_TITLES.mission,
+      message: `正在向飞控上传 ${missionItems.length} 个航点…`
+    }
   });
-
-  // 3. 立即反馈
-  ElNotification.success({
-    title: '任务上传',
-    message: `已请求上传 ${missionItems.length} 个航点`,
-    position: 'top-right'
-  });
-  store.pushNotification('任务上传', `已发起 ${missionItems.length} 个航点上传请求`, 'info');
 };
 
 const handleDownload = () => {

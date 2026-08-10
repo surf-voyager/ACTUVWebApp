@@ -1,6 +1,6 @@
 import {defineStore} from 'pinia'
 import {reactive, ref} from 'vue'
-import {ElMessage, ElNotification, ElMessageBox} from 'element-plus'
+import {ElMessage, ElMessageBox} from 'element-plus'
 import {NtripClient} from '../services/ntripClient'
 import {
     normalizeWaypointAcceptanceRadius,
@@ -13,6 +13,12 @@ import {
     parseDownloadedGeofence,
     serializeGeofence
 } from '../services/geofence'
+import {
+    formatCommandAck,
+    localizeBackendError,
+    NOTIFICATION_TITLES,
+    summarizeMissionSync
+} from '../services/systemNotifications'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -123,7 +129,7 @@ export const useGcsStore = defineStore('gcs', () => {
     })
 
     const sysLogs = reactive([]);
-    const notificationLogs = ref([]); // 新增：全局消息透传日志
+    const notificationLogs = ref([]); // 全局系统通知
     const controlStatus = reactive({
         state: 'locked',
         transitioning: false,
@@ -204,6 +210,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const MISSION_CLEAR_TIMEOUT_MS = 10000;
     const GEOFENCE_OPERATION_TIMEOUT_MS = 15000;
     const PROPULSION_FEEDBACK_STALE_MS = 2000;
+    const NOTIFICATION_DEDUPE_MS = 3000;
     const INFO_QUERY_ERROR_TEXT = {
         INVALID_REQUEST: '查询失败：请求格式错误',
         UNSUPPORTED_QUERY: '查询失败：不支持该查询项目',
@@ -212,7 +219,7 @@ export const useGcsStore = defineStore('gcs', () => {
         QUERY_TIMEOUT: '查询超时，请重试',
         MAVLINK_ERROR: '查询失败：飞控通信异常',
         PARSE_ERROR: '查询失败：无法解析飞控返回信息',
-        BACKEND_DISCONNECTED: '查询失败：后端连接已断开',
+        BACKEND_DISCONNECTED: '查询失败：机载服务连接已断开',
         FRONTEND_TIMEOUT: '查询超时，请重试',
         INVALID_RESULT: '查询失败：返回数据格式错误'
     };
@@ -323,13 +330,14 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function failPendingMissionClear(message) {
         if (mission.clearOperation.phase !== 'PENDING') return;
+        pendingCommands.delete(mission.clearOperation.pendingRequestId);
         clearMissionClearTimeout();
         Object.assign(mission.clearOperation, {
             phase: 'ERROR',
             pendingRequestId: null,
             error: message
         });
-        pushNotification('任务清空失败', message, 'error');
+        pushNotification(NOTIFICATION_TITLES.mission, message, 'error');
     }
 
     function clearGeofenceOperationTimeout() {
@@ -347,18 +355,19 @@ export const useGcsStore = defineStore('gcs', () => {
     function failPendingGeofenceOperations(message) {
         const pending = pendingGeofenceOperation();
         if (!pending) return;
+        pendingCommands.delete(geofence[pending].pendingRequestId);
         clearGeofenceOperationTimeout();
         Object.assign(geofence[pending], {
             phase: 'ERROR',
             pendingRequestId: null,
             error: message
         });
-        pushNotification('地理围栏操作失败', `${message}，本地围栏已保留`, 'error');
+        pushNotification(NOTIFICATION_TITLES.geofence, `操作失败：${message}，本地围栏已保留`, 'error');
     }
 
     function beginGeofenceOperation(operation, commandType, payload) {
         if (pendingGeofenceOperation()) {
-            pushNotification('地理围栏', '已有围栏操作正在进行，请稍后重试', 'warning');
+            pushNotification(NOTIFICATION_TITLES.geofence, '已有操作正在进行，请稍后重试', 'warning');
             return false;
         }
         const requestId = sendPacket(commandType, payload);
@@ -379,15 +388,16 @@ export const useGcsStore = defineStore('gcs', () => {
         clearGeofenceOperationTimeout();
         geofenceOperationTimeout = setTimeout(() => {
             if (geofence[operation].pendingRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
             Object.assign(geofence[operation], {
                 phase: 'ERROR',
                 pendingRequestId: null,
-                error: '请求超时，无法确认 PX4 围栏状态'
+                error: '请求超时，无法确认飞控围栏状态'
             });
             geofenceOperationTimeout = null;
             pushNotification(
-                '地理围栏操作超时',
-                '无法确认 PX4 围栏状态，本地围栏已保留',
+                NOTIFICATION_TITLES.geofence,
+                '无法确认飞控围栏状态，本地围栏已保留',
                 'error'
             );
         }, GEOFENCE_OPERATION_TIMEOUT_MS);
@@ -395,6 +405,8 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function clearWaypointAcceptanceRadius(reason = null) {
+        pendingCommands.delete(waypointAcceptanceRadius.pendingQueryRequestId);
+        pendingCommands.delete(waypointAcceptanceRadius.pendingSetRequestId);
         clearWaypointRadiusTimers();
         Object.assign(waypointAcceptanceRadius, {
             valueM: null,
@@ -423,6 +435,7 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function finishInfoQueryError(errorCode) {
         const failedQueryId = infoQuery.pendingQueryId;
+        pendingCommands.delete(infoQuery.pendingRequestId);
         clearInfoQueryTimeout();
         infoQuery.phase = 'ERROR';
         infoQuery.pendingRequestId = null;
@@ -445,15 +458,53 @@ export const useGcsStore = defineStore('gcs', () => {
         finishInfoQueryError(errorCode);
     }
 
-    function pushNotification(title, message, type = 'info') {
-        notificationLogs.value.unshift({
-            id: Date.now() + Math.random(),
-            time: new Date().toLocaleTimeString(),
+    function pushNotification(title, message, type = 'info', options = {}) {
+        const now = Date.now();
+        const time = new Date(now).toLocaleTimeString();
+        const normalizedMessage = String(message || '操作失败');
+        const key = options.key || null;
+        const dedupeKey = options.dedupeKey || `${title}:${normalizedMessage}:${type}`;
+        let existingIndex = -1;
+
+        if (key) {
+            existingIndex = notificationLogs.value.findIndex(item => item.key === key);
+        } else {
+            const dedupeWindowMs = options.dedupeWindowMs ?? NOTIFICATION_DEDUPE_MS;
+            existingIndex = notificationLogs.value.findIndex(item => (
+                item.dedupeKey === dedupeKey && now - item.updatedAt <= dedupeWindowMs
+            ));
+        }
+
+        if (existingIndex >= 0) {
+            const [existing] = notificationLogs.value.splice(existingIndex, 1);
+            Object.assign(existing, {
+                time,
+                title,
+                message: normalizedMessage,
+                type: `msg-${type}`,
+                updatedAt: now,
+                count: options.incrementCount === false ? existing.count : existing.count + 1,
+                key: key || existing.key,
+                dedupeKey
+            });
+            notificationLogs.value.unshift(existing);
+            return existing.id;
+        }
+
+        const entry = {
+            id: now + Math.random(),
+            time,
             title,
-            message,
-            type: `msg-${type}`
-        });
+            message: normalizedMessage,
+            type: `msg-${type}`,
+            updatedAt: now,
+            count: 1,
+            key,
+            dedupeKey
+        };
+        notificationLogs.value.unshift(entry);
         if (notificationLogs.value.length > 50) notificationLogs.value.pop();
+        return entry.id;
     }
 
     // --- WebSocket 相关变量 ---
@@ -461,6 +512,7 @@ export const useGcsStore = defineStore('gcs', () => {
     let reconnectTimer = null;
     let heartbeatTimer = null;
     let socketGeneration = 0;
+    const pendingCommands = new Map();
     let reconnectEnabled = true;
     const isWsConnected = ref(false);
     const wsUrl = ref(localStorage.getItem('wsUrl') || 'ws://10.168.1.199:8765');
@@ -485,13 +537,18 @@ export const useGcsStore = defineStore('gcs', () => {
             console.log("后端连接成功!");
             isWsConnected.value = true;
             leakAlert.channelConnectedAt = monotonicNow();
-            pushNotification('系统消息', '地面站后端已连接', 'success');
+            pushNotification(
+                NOTIFICATION_TITLES.onboard,
+                '连接成功',
+                'success',
+                {key: 'connection:onboard', incrementCount: false}
+            );
             if (reconnectTimer) {
                 clearTimeout(reconnectTimer);
                 reconnectTimer = null;
             }
-            sendPacket("CMD_CONNECT_VEHICLE", {});
-            sendPacket("CMD_GET_RECENT_LOGS", {}); // 连接时获取历史日志
+            sendPacket("CMD_CONNECT_VEHICLE", {}, {silent: true});
+            sendPacket("CMD_GET_RECENT_LOGS", {}, {silent: true}); // 连接时获取历史日志
             if (heartbeatTimer) clearInterval(heartbeatTimer);
             heartbeatTimer = setInterval(() => sendSimplePacket('heartbeat'), 1000);
         };
@@ -532,13 +589,26 @@ export const useGcsStore = defineStore('gcs', () => {
             failPendingGeofenceOperations('后端连接已断开');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
+            pendingCommands.clear();
             socket = null;
             if (heartbeatTimer) {
                 clearInterval(heartbeatTimer);
                 heartbeatTimer = null;
             }
             if (event.code === 1013 && event.reason) {
-                pushNotification('连接被拒绝', event.reason, 'warning');
+                pushNotification(
+                    NOTIFICATION_TITLES.onboard,
+                    event.reason,
+                    'warning',
+                    {key: 'connection:onboard', incrementCount: false}
+                );
+            } else if (reconnectEnabled) {
+                pushNotification(
+                    NOTIFICATION_TITLES.onboard,
+                    '连接已断开，正在重连',
+                    'warning',
+                    {key: 'connection:onboard', incrementCount: false}
+                );
             }
             if (reconnectEnabled && !reconnectTimer) {
                 reconnectTimer = setTimeout(() => {
@@ -590,18 +660,24 @@ export const useGcsStore = defineStore('gcs', () => {
         failPendingGeofenceOperations('后端连接已断开');
         clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
+        pendingCommands.clear();
     }
 
     function changeWsUrl(newUrl) {
         if (newUrl === wsUrl.value) {
-            pushNotification('提示', '新地址与当前地址相同，无需更改', 'info');
+            ElMessage.info('新地址与当前地址相同，无需更改');
             return;
         }
 
         const doChange = () => {
             wsUrl.value = newUrl;
             localStorage.setItem('wsUrl', newUrl);
-            pushNotification('系统消息', '连接地址已更新，正在重新连接...', 'success');
+            pushNotification(
+                NOTIFICATION_TITLES.onboard,
+                '连接地址已更新，正在重新连接…',
+                'info',
+                {key: 'connection:onboard', incrementCount: false}
+            );
             disconnectWebSocket();
             reconnectEnabled = true;
             setTimeout(connectWebSocket, 500);
@@ -620,7 +696,7 @@ export const useGcsStore = defineStore('gcs', () => {
             ).then(() => {
                 doChange();
             }).catch(() => {
-                pushNotification('提示', '已取消更改', 'info');
+                ElMessage.info('已取消更改');
             });
         } else {
             doChange();
@@ -636,6 +712,7 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function resetLeakRtlState() {
+        pendingCommands.delete(leakAlert.rtlRequestId);
         clearLeakRtlTimeout();
         leakAlert.rtlRequestId = null;
         leakAlert.rtlStatus = 'IDLE';
@@ -671,10 +748,10 @@ export const useGcsStore = defineStore('gcs', () => {
 
         if (detected && !wasDetected) {
             resetLeakRtlState();
-            pushNotification('漏水告警', '检测到舱内漏水', 'error');
+            pushNotification(NOTIFICATION_TITLES.safety, '检测到舱内漏水', 'error');
         }
         if (sensorFault && !hadSensorFault) {
-            pushNotification('传感器故障', '漏水传感器状态异常', 'warning');
+            pushNotification(NOTIFICATION_TITLES.safety, '漏水传感器状态异常', 'warning');
         }
     }
 
@@ -696,7 +773,7 @@ export const useGcsStore = defineStore('gcs', () => {
         leakAlert.lingerDeadline = monotonicNow() + LEAK_ALERT_LINGER_MS;
         leakAlert.lingerRemainingSeconds = Math.ceil(LEAK_ALERT_LINGER_MS / 1000);
         pushNotification(
-            hadLeak ? '漏水观察' : '传感器恢复',
+            NOTIFICATION_TITLES.safety,
             hadLeak ? '漏水信号已停止，持续观察 10 秒' : '漏水传感器已恢复，持续观察 10 秒',
             hadLeak ? 'warning' : 'success'
         );
@@ -716,7 +793,7 @@ export const useGcsStore = defineStore('gcs', () => {
     function markLeakChannelDisconnected() {
         if (leakAlert.detected) {
             if (!leakAlert.communicationLost) {
-                pushNotification('漏水告警', '通信中断，漏水状态未知', 'error');
+                pushNotification(NOTIFICATION_TITLES.safety, '通信中断，漏水状态未知', 'error');
             }
             leakAlert.communicationLost = true;
             leakAlert.phase = 'LEAK_UNKNOWN';
@@ -869,17 +946,25 @@ export const useGcsStore = defineStore('gcs', () => {
                     if (controlStatus.reason && controlStatus.reason !== previousReason) {
                         const isSafetyLock = controlStatus.state === 'locked'
                             && /自动上锁|连接断开|无消息/.test(controlStatus.reason);
-                        pushNotification(
-                            isSafetyLock ? '安全锁定' : '地面控制失败',
+                        const reason = localizeBackendError(
                             controlStatus.reason,
-                            isSafetyLock ? 'warning' : 'error'
+                            isSafetyLock ? '飞控已进入安全锁定状态' : '地面控制操作失败'
+                        );
+                        pushNotification(
+                            isSafetyLock ? NOTIFICATION_TITLES.safety : NOTIFICATION_TITLES.groundControl,
+                            reason,
+                            isSafetyLock ? 'warning' : 'error',
+                            isSafetyLock
+                                ? {dedupeKey: `safety:${reason}`}
+                                : {key: 'ground-control:state', incrementCount: false}
                         );
                     } else if (controlStatus.state !== previousState) {
                         const entered = controlStatus.state === 'manual';
                         pushNotification(
-                            '地面控制',
+                            NOTIFICATION_TITLES.groundControl,
                             entered ? '已进入手操并确认解锁' : '已归零并确认上锁',
-                            entered ? 'success' : 'warning'
+                            entered ? 'success' : 'warning',
+                            {key: 'ground-control:state', incrementCount: false}
                         );
                     }
                 }
@@ -928,6 +1013,19 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function handleAck(payload) {
         const {request_id, command_type, success, message} = payload;
+        const commandContext = pendingCommands.get(request_id) || {
+            type: command_type,
+            payload: {},
+            notificationKey: null,
+            silent: false,
+            silentSuccess: false,
+            successNotification: null,
+            failureTitle: null
+        };
+        pendingCommands.delete(request_id);
+        const notificationOptions = commandContext.notificationKey
+            ? {key: commandContext.notificationKey, incrementCount: false}
+            : {};
         const geofenceCommands = {
             CMD_UPLOAD_GEOFENCE: 'upload',
             CMD_DOWNLOAD_GEOFENCE: 'download',
@@ -942,8 +1040,8 @@ export const useGcsStore = defineStore('gcs', () => {
 
             if (!success) {
                 operation.phase = 'ERROR';
-                operation.error = message || 'PX4 地理围栏操作失败';
-                pushNotification('地理围栏操作失败', operation.error, 'error');
+                operation.error = localizeBackendError(message, '飞控地理围栏操作失败');
+                pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
                 return;
             }
 
@@ -954,7 +1052,7 @@ export const useGcsStore = defineStore('gcs', () => {
                 } catch (error) {
                     operation.phase = 'ERROR';
                     operation.error = error?.message || '飞控返回的围栏数据无效';
-                    pushNotification('地理围栏读取失败', operation.error, 'error');
+                    pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
                     return;
                 }
             } else if (geofenceOperation === 'clear') {
@@ -967,11 +1065,10 @@ export const useGcsStore = defineStore('gcs', () => {
             operation.error = null;
             triggerRedraw();
             pushNotification(
-                geofenceOperation === 'upload'
-                    ? '地理围栏已发送'
-                    : (geofenceOperation === 'download' ? '地理围栏已读取' : '地理围栏已清空'),
-                message || 'PX4 地理围栏操作成功',
-                'success'
+                NOTIFICATION_TITLES.geofence,
+                message || '飞控地理围栏操作成功',
+                'success',
+                notificationOptions
             );
             return;
         }
@@ -984,8 +1081,8 @@ export const useGcsStore = defineStore('gcs', () => {
             if (!success) {
                 waypointAcceptanceRadius.setPhase = 'ERROR';
                 waypointAcceptanceRadius.expectedValueM = null;
-                waypointAcceptanceRadius.error = message || '配置失败';
-                pushNotification('航点接受半径', message || '配置失败', 'error');
+                waypointAcceptanceRadius.error = localizeBackendError(message, '航点接受半径配置失败');
+                pushNotification(NOTIFICATION_TITLES.parameter, waypointAcceptanceRadius.error, 'error');
                 return;
             }
 
@@ -1004,20 +1101,24 @@ export const useGcsStore = defineStore('gcs', () => {
             leakAlert.rtlStatus = success ? 'SUCCESS' : 'ERROR';
             leakAlert.rtlMessage = success
                 ? '返航指令已接受'
-                : (message || '返航指令执行失败');
+                : localizeBackendError(message, '返航指令执行失败');
             pushNotification(
-                success ? '漏水返航' : '返航失败',
+                NOTIFICATION_TITLES.returnHome,
                 leakAlert.rtlMessage,
-                success ? 'success' : 'error'
+                success ? 'success' : 'error',
+                notificationOptions
             );
             return;
         }
 
         if (command_type === 'CMD_RETURN_HOME') {
             pushNotification(
-                success ? '返航已启动' : '返航失败',
-                message || (success ? 'PX4 已进入返航模式' : '返航流程执行失败'),
-                success ? 'success' : 'error'
+                NOTIFICATION_TITLES.returnHome,
+                success
+                    ? (message || '飞控已进入返航模式')
+                    : localizeBackendError(message, '返航流程执行失败'),
+                success ? 'success' : 'error',
+                notificationOptions
             );
             return;
         }
@@ -1029,11 +1130,12 @@ export const useGcsStore = defineStore('gcs', () => {
 
             if (!success) {
                 mission.clearOperation.phase = 'ERROR';
-                mission.clearOperation.error = message || '飞控任务清空失败';
+                mission.clearOperation.error = localizeBackendError(message, '飞控任务清空失败');
                 pushNotification(
-                    '任务清空失败',
+                    NOTIFICATION_TITLES.mission,
                     `${mission.clearOperation.error}，本地航点已保留`,
-                    'error'
+                    'error',
+                    notificationOptions
                 );
                 return;
             }
@@ -1042,18 +1144,16 @@ export const useGcsStore = defineStore('gcs', () => {
             mission.clearOperation.phase = 'SUCCESS';
             mission.clearOperation.error = null;
             pushNotification(
-                '任务已清空',
-                message || '前端本地航点和 PX4 任务均已清空',
-                'success'
+                NOTIFICATION_TITLES.mission,
+                message || '本地航点和飞控任务均已清空',
+                'success',
+                notificationOptions
             );
             return;
         }
 
         if (success) {
-            if (command_type !== 'CMD_MANUAL_CONTROL' && command_type !== 'CMD_SET_RELAY' && command_type !== 'CMD_GET_RECENT_LOGS') {
-                pushNotification('指令成功', message || '指令执行成功', 'success');
-            }
-            if (command_type === 'CMD_DOWNLOAD_MISSION' && payload.mission_items) {
+            if (command_type === 'CMD_DOWNLOAD_MISSION' && Array.isArray(payload.mission_items)) {
                 processDownloadedMission(payload.mission_items);
             }
             if (command_type === 'CMD_GET_RECENT_LOGS' && payload.logs) {
@@ -1066,12 +1166,35 @@ export const useGcsStore = defineStore('gcs', () => {
                     }
                 });
             }
-        } else {
-            pushNotification('指令失败', message, 'error');
+        }
+
+        let notification = formatCommandAck({
+            commandType: command_type,
+            success,
+            message,
+            requestPayload: commandContext.payload,
+            silentSuccess: commandContext.silent || commandContext.silentSuccess
+        });
+        if (success && commandContext.successNotification) {
+            notification = {
+                type: 'success',
+                ...commandContext.successNotification
+            };
+        } else if (!success && notification && commandContext.failureTitle) {
+            notification.title = commandContext.failureTitle;
+        }
+        if (notification && !commandContext.silent) {
+            pushNotification(
+                notification.title,
+                notification.message,
+                notification.type,
+                notificationOptions
+            );
         }
     }
 
     function handleInfoQueryResult(payload = {}) {
+        pendingCommands.delete(payload.request_id);
         if (payload.request_id === waypointAcceptanceRadius.pendingQueryRequestId
             && payload.query_id === 'WAYPOINT_ACCEPTANCE_RADIUS') {
             finishBackgroundWaypointRadiusQuery(payload);
@@ -1114,16 +1237,9 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function processDownloadedMission(items) {
-        if (!items) { // 允许空任务
-            mission.plannedWaypoints = [];
-            mission.progress.total = 0;
-            mission.progress.current = 0;
-            pushNotification('任务信息', '飞控上无任务', 'info');
-            return;
-        }
-        
+        const receivedItems = Array.isArray(items) ? items : [];
         const validPoints = [];
-        items.forEach((item) => {
+        receivedItems.forEach((item) => {
             if (item.latitude == null || isNaN(item.latitude) ||
                 item.longitude == null || isNaN(item.longitude)) {
                 return;
@@ -1145,17 +1261,24 @@ export const useGcsStore = defineStore('gcs', () => {
         mission.progress.total = validPoints.length;
         mission.progress.current = 0; // 重置当前航点
         triggerRedraw();
-        if (validPoints.length > 0) {
-            pushNotification('任务加载', `已从飞控加载 ${validPoints.length} 个航点`, 'success');
-        } else {
-            pushNotification('任务信息', '飞控上无有效航点', 'info');
-        }
+        const summary = summarizeMissionSync(receivedItems.length, validPoints.length);
+        pushNotification(
+            NOTIFICATION_TITLES.mission,
+            summary.message,
+            summary.type,
+            {key: 'mission:sync', incrementCount: false}
+        );
     }
 
-    function sendPacket(type, payload) {
+    function sendPacket(type, payload = {}, options = {}) {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
             if (type !== 'CMD_MANUAL_CONTROL') {
-                pushNotification('连接警告', '未连接到后端服务', 'warning');
+                pushNotification(
+                    NOTIFICATION_TITLES.onboard,
+                    '未连接，无法发送请求',
+                    'warning',
+                    {dedupeKey: 'connection:send-failed'}
+                );
             }
             return null;
         }
@@ -1169,6 +1292,27 @@ export const useGcsStore = defineStore('gcs', () => {
         if(packet.type!=="CMD_MANUAL_CONTROL"){
             console.log(JSON.stringify(packet))
         }
+        if (type !== 'CMD_MANUAL_CONTROL') {
+            const notificationKey = options.notificationKey
+                || (options.pendingNotification ? `request:${requestId}` : null);
+            pendingCommands.set(requestId, {
+                type,
+                payload,
+                notificationKey,
+                silent: options.silent === true,
+                silentSuccess: options.silentSuccess === true,
+                successNotification: options.successNotification || null,
+                failureTitle: options.failureTitle || null
+            });
+            if (options.pendingNotification) {
+                pushNotification(
+                    options.pendingNotification.title,
+                    options.pendingNotification.message,
+                    options.pendingNotification.type || 'info',
+                    {key: notificationKey, incrementCount: false}
+                );
+            }
+        }
         socket.send(JSON.stringify(packet));
         return requestId;
     }
@@ -1176,21 +1320,21 @@ export const useGcsStore = defineStore('gcs', () => {
     function requestMissionClear() {
         if (mission.clearOperation.phase === 'PENDING') return false;
         if (!isWsConnected.value) {
-            pushNotification('任务清空失败', '后端未连接，本地航点已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.mission, '机载服务未连接，无法清空任务；本地航点已保留', 'error');
             return false;
         }
         if (!vehicle.connected) {
-            pushNotification('任务清空失败', 'PX4 未连接，本地航点已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.mission, '飞控未连接，无法清空任务；本地航点已保留', 'error');
             return false;
         }
         if (!vehicle.armedKnown) {
-            pushNotification('任务清空失败', 'PX4 解锁状态未知，本地航点已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.mission, '飞控解锁状态未知，无法清空任务；本地航点已保留', 'error');
             return false;
         }
         if (vehicle.armed) {
             pushNotification(
-                '任务清空失败',
-                '请先进入暂停模式并确认 PX4 上锁，本地航点已保留',
+                NOTIFICATION_TITLES.mission,
+                '请先进入暂停模式并确认飞控上锁；本地航点已保留',
                 'warning'
             );
             return false;
@@ -1207,11 +1351,12 @@ export const useGcsStore = defineStore('gcs', () => {
         });
         missionClearTimeout = setTimeout(() => {
             if (mission.clearOperation.pendingRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
             mission.clearOperation.pendingRequestId = null;
             mission.clearOperation.phase = 'ERROR';
             mission.clearOperation.error = '清空请求超时，无法确认飞控任务状态';
             pushNotification(
-                '任务清空超时',
+                NOTIFICATION_TITLES.mission,
                 '无法确认飞控清空结果，本地航点已保留',
                 'error'
             );
@@ -1228,7 +1373,7 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function removeGeofencePoint(index) {
         if (geofence.points.length <= 3) {
-            pushNotification('地理围栏', '多边形至少需要 3 个角点', 'warning');
+            pushNotification(NOTIFICATION_TITLES.geofence, '多边形至少需要 3 个角点', 'warning');
             return false;
         }
         if (!Number.isInteger(index) || index < 0 || index >= geofence.points.length) {
@@ -1242,20 +1387,20 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function geofenceConnectionReady(operationName, {requireDisarmed = false} = {}) {
         if (!isWsConnected.value) {
-            pushNotification(operationName, '后端未连接，本地围栏已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：机载服务未连接，本地围栏已保留`, 'error');
             return false;
         }
         if (!vehicle.connected) {
-            pushNotification(operationName, 'PX4 未连接，本地围栏已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控未连接，本地围栏已保留`, 'error');
             return false;
         }
         if (!requireDisarmed) return true;
         if (!vehicle.armedKnown) {
-            pushNotification(operationName, 'PX4 解锁状态未知，本地围栏已保留', 'error');
+            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控解锁状态未知，本地围栏已保留`, 'error');
             return false;
         }
         if (vehicle.armed) {
-            pushNotification(operationName, 'PX4 已解锁，请先上锁再操作', 'warning');
+            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控已解锁，请先上锁再操作`, 'warning');
             return false;
         }
         return true;
@@ -1269,7 +1414,7 @@ export const useGcsStore = defineStore('gcs', () => {
         try {
             payload = serializeGeofence(geofence.points);
         } catch (error) {
-            pushNotification('地理围栏发送失败', error?.message || '本地围栏无效', 'error');
+            pushNotification(NOTIFICATION_TITLES.geofence, error?.message || '本地围栏无效，无法发送', 'error');
             return false;
         }
         return beginGeofenceOperation('upload', 'CMD_UPLOAD_GEOFENCE', payload);
@@ -1325,6 +1470,7 @@ export const useGcsStore = defineStore('gcs', () => {
     }
 
     function finishBackgroundWaypointRadiusQuery(payload) {
+        pendingCommands.delete(payload.request_id);
         if (waypointRadiusQueryTimeout) clearTimeout(waypointRadiusQueryTimeout);
         waypointRadiusQueryTimeout = null;
         waypointAcceptanceRadius.pendingQueryRequestId = null;
@@ -1342,8 +1488,8 @@ export const useGcsStore = defineStore('gcs', () => {
                     returnedRadius,
                     waypointAcceptanceRadius.expectedValueM
                 )) {
-            errorMessage = `配置校验失败：期望 ${waypointAcceptanceRadius.expectedValueM.toFixed(1)}m，`
-                    + `飞控返回 ${returnedRadius.toFixed(1)}m`;
+            errorMessage = `配置校验失败：期望 ${waypointAcceptanceRadius.expectedValueM.toFixed(1)} m，`
+                    + `飞控返回 ${returnedRadius.toFixed(1)} m`;
             } else {
                 applyWaypointAcceptanceRadius(payload.data);
             }
@@ -1359,15 +1505,15 @@ export const useGcsStore = defineStore('gcs', () => {
                 waypointAcceptanceRadius.setPhase = 'ERROR';
             }
             if (waypointAcceptanceRadius.notifyOnQueryError) {
-                pushNotification('航点接受半径', errorMessage, 'warning');
+                pushNotification(NOTIFICATION_TITLES.parameter, errorMessage, 'warning');
             }
         } else {
             waypointAcceptanceRadius.queryPhase = 'SUCCESS';
             if (waypointAcceptanceRadius.setPhase === 'VERIFYING') {
                 waypointAcceptanceRadius.setPhase = 'SUCCESS';
                 pushNotification(
-                    '航点接受半径',
-                    `已配置并确认 ${waypointAcceptanceRadius.valueM.toFixed(1)}m`,
+                    NOTIFICATION_TITLES.parameter,
+                    `已配置并确认 ${waypointAcceptanceRadius.valueM.toFixed(1)} m`,
                     'success'
                 );
             }
@@ -1404,7 +1550,7 @@ export const useGcsStore = defineStore('gcs', () => {
                 : INFO_QUERY_ERROR_TEXT.PX4_NOT_CONNECTED;
             if (notifyOnError) {
                 pushNotification(
-                    '航点接受半径',
+                    NOTIFICATION_TITLES.parameter,
                     waypointAcceptanceRadius.error,
                     'warning'
                 );
@@ -1437,19 +1583,19 @@ export const useGcsStore = defineStore('gcs', () => {
     function setWaypointAcceptanceRadius(value) {
         const radius = normalizeWaypointAcceptanceRadius(value);
         if (radius === null) {
-            pushNotification('航点接受半径', '请输入 0.05–200.0m 范围内的数值', 'warning');
+            pushNotification(NOTIFICATION_TITLES.parameter, '航点接受半径必须在 0.05–200.0 m 范围内', 'warning');
             return false;
         }
         if (!isWsConnected.value || !vehicle.connected) {
-            pushNotification('航点接受半径', '后端或 PX4 未连接', 'warning');
+            pushNotification(NOTIFICATION_TITLES.parameter, '机载服务或飞控未连接，无法配置航点接受半径', 'warning');
             return false;
         }
         if (!vehicle.armedKnown) {
-            pushNotification('航点接受半径', 'PX4 解锁状态未知，无法配置', 'warning');
+            pushNotification(NOTIFICATION_TITLES.parameter, '飞控解锁状态未知，无法配置航点接受半径', 'warning');
             return false;
         }
         if (vehicle.armed) {
-            pushNotification('航点接受半径', '请先上锁 PX4 再配置', 'warning');
+            pushNotification(NOTIFICATION_TITLES.parameter, '请先上锁飞控，再配置航点接受半径', 'warning');
             return false;
         }
         if (waypointAcceptanceRadius.setPhase === 'PENDING'
@@ -1467,11 +1613,12 @@ export const useGcsStore = defineStore('gcs', () => {
         if (waypointRadiusSetTimeout) clearTimeout(waypointRadiusSetTimeout);
         waypointRadiusSetTimeout = setTimeout(() => {
             if (waypointAcceptanceRadius.pendingSetRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
             waypointAcceptanceRadius.pendingSetRequestId = null;
             waypointAcceptanceRadius.expectedValueM = null;
             waypointAcceptanceRadius.setPhase = 'ERROR';
             waypointAcceptanceRadius.error = '配置请求超时，请重试';
-            pushNotification('航点接受半径', waypointAcceptanceRadius.error, 'error');
+            pushNotification(NOTIFICATION_TITLES.parameter, waypointAcceptanceRadius.error, 'error');
             waypointRadiusSetTimeout = null;
         }, INFO_QUERY_TIMEOUT_MS);
         return true;
@@ -1480,15 +1627,15 @@ export const useGcsStore = defineStore('gcs', () => {
     function requestLeakReturn() {
         if (leakAlert.rtlStatus === 'PENDING') return false;
         if (!isWsConnected.value) {
-            pushNotification('返航失败', '后端通信已断开，无法执行返航', 'error');
+            pushNotification(NOTIFICATION_TITLES.returnHome, '机载服务通信已断开，无法执行返航', 'error');
             return false;
         }
         if (!vehicle.connected) {
-            pushNotification('返航失败', 'PX4 未连接，无法执行返航', 'error');
+            pushNotification(NOTIFICATION_TITLES.returnHome, '飞控未连接，无法执行返航', 'error');
             return false;
         }
         if (!vehicle.armed) {
-            pushNotification('返航提示', '当前未解锁，无法执行返航', 'warning');
+            pushNotification(NOTIFICATION_TITLES.returnHome, '飞控当前未解锁，无法执行返航', 'warning');
             return false;
         }
 
@@ -1501,10 +1648,11 @@ export const useGcsStore = defineStore('gcs', () => {
         leakAlert.rtlMessage = '正在请求返航…';
         leakRtlTimeout = setTimeout(() => {
             if (leakAlert.rtlRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
             leakAlert.rtlRequestId = null;
             leakAlert.rtlStatus = 'ERROR';
             leakAlert.rtlMessage = '返航请求超时，请重试';
-            pushNotification('返航超时', leakAlert.rtlMessage, 'error');
+            pushNotification(NOTIFICATION_TITLES.returnHome, leakAlert.rtlMessage, 'error');
             leakRtlTimeout = null;
         }, 3000);
         return true;
@@ -1513,7 +1661,7 @@ export const useGcsStore = defineStore('gcs', () => {
     function sendSimplePacket(type, fields = {}) {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
             if (type !== 'control' && type !== 'heartbeat') {
-                pushNotification('连接警告', '未连接到后端服务', 'warning');
+                pushNotification(NOTIFICATION_TITLES.onboard, '未连接，无法发送请求', 'warning', {dedupeKey: 'connection:send-failed'});
             }
             return false;
         }
@@ -1550,13 +1698,13 @@ export const useGcsStore = defineStore('gcs', () => {
         if (!normalized.host || !Number.isInteger(normalized.port)
             || normalized.port < 1 || normalized.port > 65535
             || !normalized.mountpoint || !normalized.username || !normalized.password) {
-            pushNotification('差分配置', '请完整填写主机、端口、挂载点、用户名和密码', 'warning');
+            pushNotification(NOTIFICATION_TITLES.ntrip, '请完整填写主机、端口、挂载点、用户名和密码', 'warning');
             return false;
         }
         Object.assign(ntripConfig, normalized);
         localStorage.setItem('ntripConfig', JSON.stringify(normalized));
         ntripClient?.configurationChanged();
-        pushNotification('差分配置', '配置已保存，正在等待有效定位并自动登录', 'success');
+        pushNotification(NOTIFICATION_TITLES.ntrip, '配置已保存；正在等待有效定位并自动登录', 'info');
         return true;
     }
 
@@ -1615,13 +1763,13 @@ export const useGcsStore = defineStore('gcs', () => {
     // --- 新增: 清除轨迹 ---
     function clearTrajectory() {
         vehicle.trajectory = [];
-        pushNotification('操作成功', '轨迹已清除', 'success');
+        ElMessage.success('轨迹已清除');
     }
 
     // --- 新增: 继电器控制 ---
     function setRelay(state) {
         if (state && vehicle.battery.is_low_battery_rtl_triggered) {
-            pushNotification('操作被阻止', '低电量返航中，禁止开启混合搅拌器', 'warning');
+            pushNotification(NOTIFICATION_TITLES.safety, '低电量返航中，禁止开启混合搅拌器', 'warning');
             return;
         }
         sendPacket('CMD_SET_RELAY', {state: state ? 1 : 0});
@@ -1653,6 +1801,11 @@ export const useGcsStore = defineStore('gcs', () => {
             lat: lat,
             lon: lon,
             alt: alt
+        }, {
+            pendingNotification: {
+                title: NOTIFICATION_TITLES.returnHome,
+                message: '正在更新返航点…'
+            }
         });
     }
 
@@ -1674,7 +1827,13 @@ export const useGcsStore = defineStore('gcs', () => {
                 customClass: 'hud-message-box'
             }
         ).then(() => {
-            sendPacket('CMD_SHUTDOWN_PI', {});
+            sendPacket('CMD_SHUTDOWN_PI', {}, {
+                pendingNotification: {
+                    title: NOTIFICATION_TITLES.system,
+                    message: '正在关闭机载计算机…',
+                    type: 'warning'
+                }
+            });
         }).catch(() => {});
     }
 
@@ -1689,7 +1848,13 @@ export const useGcsStore = defineStore('gcs', () => {
                 customClass: 'hud-message-box'
             }
         ).then(() => {
-            sendPacket('CMD_SHUTDOWN_FCU', {});
+            sendPacket('CMD_SHUTDOWN_FCU', {}, {
+                pendingNotification: {
+                    title: NOTIFICATION_TITLES.system,
+                    message: '正在关闭飞控…',
+                    type: 'warning'
+                }
+            });
         }).catch(() => {});
     }
 
