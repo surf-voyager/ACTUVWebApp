@@ -1,23 +1,33 @@
 <template>
   <div id="map-container"></div>
 
-  <div v-if="isManualSave && downloadProgress > 0 && downloadProgress < 100" class="download-status">
+  <div
+    v-if="downloadState !== 'idle'"
+    class="download-status"
+    :class="downloadState"
+  >
     <div class="status-header">
-      <span>正在缓存作战水域...</span>
+      <span>{{ downloadTitle }}</span>
       <span class="percentage">{{ downloadProgress }}%</span>
     </div>
-    <el-progress :percentage="downloadProgress" :show-text="false" :stroke-width="10" status="success" />
-    <span class="status-detail">已缓存 {{ savedTiles }} / {{ totalTiles }} 张瓦片</span>
+    <el-progress
+      :percentage="downloadProgress"
+      :show-text="false"
+      :stroke-width="9"
+      :status="downloadProgressStatus"
+      :color="downloadProgressColor"
+    />
+    <span class="status-detail">{{ downloadDetail }}</span>
   </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
 // 插件
-import 'leaflet.offline';
+import {downloadTile, hasTile, saveTile} from 'leaflet.offline';
 import '@geoman-io/leaflet-geoman-free';
 import '@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css';
 import 'leaflet-rotatedmarker';
@@ -66,13 +76,37 @@ let boatMarker = null;
 let homeMarker = null; // 新增：HOME点标记
 let trajectoryPolyline = null;
 let trajectoryShadow = null; // <--- 轨迹阴影
-let autoSaveTimer = null;
+let downloadCloseTimer = null;
 
 // 下载状态
 const downloadProgress = ref(0);
 const totalTiles = ref(0);
 const savedTiles = ref(0);
-const isManualSave = ref(false);
+const failedTiles = ref(0);
+const downloadState = ref('idle');
+const downloadError = ref('');
+const downloadTitle = computed(() => ({
+  downloading: '正在下载当前视野',
+  success: '当前视野下载完成',
+  error: '当前视野下载失败'
+})[downloadState.value] || '');
+const downloadProgressStatus = computed(() => {
+  if (downloadState.value === 'success') return 'success';
+  if (downloadState.value === 'error') return 'exception';
+  return undefined;
+});
+const downloadProgressColor = computed(() =>
+  downloadState.value === 'downloading' ? '#78b7ff' : undefined
+);
+const downloadDetail = computed(() => {
+  if (downloadState.value === 'error') {
+    return `${downloadError.value}（成功 ${savedTiles.value}，失败 ${failedTiles.value}，共 ${totalTiles.value} 张）`;
+  }
+  if (downloadState.value === 'success') {
+    return `已缓存 ${savedTiles.value} / ${totalTiles.value} 张瓦片`;
+  }
+  return `正在处理 ${savedTiles.value + failedTiles.value} / ${totalTiles.value} 张瓦片`;
+});
 
 // --- 生命周期 ---
 onMounted(() => {
@@ -83,7 +117,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
   if (map) map.remove();
 });
 
@@ -154,29 +188,6 @@ const initOfflineSystem = () => {
     saveWhatYouOnto: true,
     crossOrigin: true,
   }).addTo(map);
-
-  baseLayer.on('savestart', (e) => {
-    if (isManualSave.value) {
-      downloadProgress.value = 0;
-      totalTiles.value = e._tilesforSave.length;
-      savedTiles.value = 0;
-    }
-  });
-
-  baseLayer.on('savetileend', () => {
-    if (isManualSave.value) {
-      savedTiles.value++;
-      if (totalTiles.value > 0) {
-        downloadProgress.value = Math.round((savedTiles.value / totalTiles.value) * 100);
-      }
-    }
-  });
-
-  baseLayer.on('loadend', () => {
-    if (isManualSave.value && downloadProgress.value >= 100) {
-      setTimeout(() => { downloadProgress.value = 0; isManualSave.value = false; }, 2000);
-    }
-  });
 };
 
 const initBoat = () => {
@@ -423,10 +434,99 @@ const renderAreaSelection = () => {
 };
 
 
-const saveCurrentArea = () => {
-  if (baseLayer) {
-    isManualSave.value = true;
-    baseLayer.saveTiles(map.getZoom(), () => {}, () => {}, map.getBounds());
+const scheduleDownloadPanelClose = (delayMs) => {
+  if (downloadCloseTimer) clearTimeout(downloadCloseTimer);
+  downloadCloseTimer = setTimeout(() => {
+    downloadState.value = 'idle';
+    downloadCloseTimer = null;
+  }, delayMs);
+};
+
+const updateDownloadProgress = () => {
+  const processed = savedTiles.value + failedTiles.value;
+  downloadProgress.value = totalTiles.value > 0
+    ? Math.min(100, Math.round((processed / totalTiles.value) * 100))
+    : 0;
+};
+
+const cacheMapTile = async (tile) => {
+  try {
+    if (!await hasTile(tile.key)) {
+      const blob = await downloadTile(tile.url);
+      await saveTile(tile, blob);
+    }
+    savedTiles.value += 1;
+  } catch (error) {
+    failedTiles.value += 1;
+    if (!downloadError.value) {
+      downloadError.value = '地图瓦片下载或本地缓存写入失败';
+      console.error('地图瓦片缓存失败:', error);
+    }
+  } finally {
+    updateDownloadProgress();
+  }
+};
+
+const cacheTilesWithConcurrency = async (tiles, concurrency = 6) => {
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < tiles.length) {
+      const tile = tiles[nextIndex];
+      nextIndex += 1;
+      await cacheMapTile(tile);
+    }
+  };
+  await Promise.all(
+    Array.from({length: Math.min(concurrency, tiles.length)}, () => worker())
+  );
+};
+
+const saveCurrentArea = async () => {
+  if (!baseLayer || !map || downloadState.value === 'downloading') return false;
+  if (downloadCloseTimer) {
+    clearTimeout(downloadCloseTimer);
+    downloadCloseTimer = null;
+  }
+
+  downloadState.value = 'downloading';
+  downloadProgress.value = 0;
+  totalTiles.value = 0;
+  savedTiles.value = 0;
+  failedTiles.value = 0;
+  downloadError.value = '';
+
+  try {
+    const currentZoom = map.getZoom();
+    const nativeZoom = Number(baseLayer.options.maxNativeZoom);
+    const downloadZoom = Number.isFinite(nativeZoom)
+      ? Math.min(currentZoom, nativeZoom)
+      : currentZoom;
+    const visibleBounds = map.getBounds();
+    const pixelBounds = L.bounds(
+      map.project(visibleBounds.getNorthWest(), downloadZoom),
+      map.project(visibleBounds.getSouthEast(), downloadZoom)
+    );
+    const tiles = baseLayer.getTileUrls(pixelBounds, downloadZoom);
+    totalTiles.value = tiles.length;
+    if (tiles.length === 0) throw new Error('当前视野没有可下载的地图瓦片');
+
+    await cacheTilesWithConcurrency(tiles);
+    if (failedTiles.value > 0) {
+      downloadState.value = 'error';
+      downloadError.value = downloadError.value || '部分地图瓦片下载失败';
+      scheduleDownloadPanelClose(10000);
+      return false;
+    }
+
+    downloadProgress.value = 100;
+    downloadState.value = 'success';
+    scheduleDownloadPanelClose(5000);
+    return true;
+  } catch (error) {
+    downloadState.value = 'error';
+    downloadError.value = error?.message || '地图下载失败';
+    scheduleDownloadPanelClose(10000);
+    return false;
   }
 };
 
@@ -590,19 +690,30 @@ const handleModeChange = (pageName) => {
 
 .download-status {
   position: absolute;
-  bottom: 100px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 360px;
-  background: rgba(20, 20, 20, 0.9);
-  backdrop-filter: blur(4px);
-  padding: 16px 20px;
-  border-radius: 12px;
+  bottom: 88px;
+  left: 300px;
+  width: 320px;
+  box-sizing: border-box;
+  background: rgba(24, 91, 170, 0.78);
+  backdrop-filter: blur(8px);
+  padding: 13px 15px;
+  border-radius: 10px;
   z-index: 9999;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6);
-  color: white;
+  border: 1px solid rgba(120, 183, 255, 0.7);
+  box-shadow: 0 7px 20px rgba(0, 25, 60, 0.45);
+  color: #d9ecff;
   animation: slideUp 0.3s ease-out;
+  transition: color 0.25s ease, background 0.25s ease, border-color 0.25s ease;
+}
+.download-status.success {
+  background: rgba(20, 91, 58, 0.82);
+  border-color: rgba(103, 194, 58, 0.8);
+  color: #85e6a6;
+}
+.download-status.error {
+  background: rgba(120, 31, 42, 0.84);
+  border-color: rgba(245, 108, 108, 0.85);
+  color: #ffadb3;
 }
 .status-header {
   display: flex;
@@ -610,24 +721,25 @@ const handleModeChange = (pageName) => {
   margin-bottom: 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #fff;
+  color: inherit;
 }
 
 .percentage {
-  color: #67c23a;
+  color: inherit;
 }
 
 .status-detail {
   display: block;
   margin-top: 8px;
   font-size: 12px;
-  color: #aaa;
-  text-align: right;
+  color: inherit;
+  opacity: 0.9;
+  text-align: left;
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translate(-50%, 20px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 </style>
 <style>

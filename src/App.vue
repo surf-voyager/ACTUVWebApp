@@ -63,11 +63,21 @@ const handleFocusBoat = () => {
     mapRef.value.focusBoat()
   }
 }
+const handleSaveCurrentMap = () => {
+  if (mapRef.value) {
+    mapRef.value.saveCurrentArea();
+  }
+}
 // --- 添加这段监听代码 ---
 watch(() => store.mapTriggers.centerMap, (newVal) => {
   if (newVal) {
     handleFocusBoat(); // 执行父组件的定位逻辑
     store.mapTriggers.centerMap = false; // 立即复位，保证下次点击还能触发
+  }
+});
+watch(() => store.mapTriggers.saveCurrentMap, (newVal) => {
+  if (newVal) {
+    handleSaveCurrentMap();
   }
 });
 const activateAlarmAudio = () => {

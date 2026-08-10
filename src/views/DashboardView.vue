@@ -159,17 +159,18 @@
           </div>
         </section>
 
-        <!-- 5. 交互工具 -->
+        <!-- 5. 地图工具 -->
         <section class="panel-section">
           <div class="section-header">
             <el-icon>
               <Tools/>
             </el-icon>
-            <span>交互工具</span>
+            <span>地图工具</span>
           </div>
           <div class="mode-grid-flat">
-            <button class="mode-btn-flat small" @click="handleCenterMap">地图居中</button>
+            <button class="mode-btn-flat small" @click="handleCenterMap">船舶居中</button>
             <button class="mode-btn-flat small" @click="store.clearTrajectory">清除轨迹</button>
+            <button class="mode-btn-flat small full-row" @click="handleSaveMap">下载当前视野</button>
           </div>
         </section>
 
@@ -1315,6 +1316,10 @@ const handleCenterMap = () => {
   store.pushNotification('地图工具', '已将视角定位至无人艇', 'info');
 };
 
+const handleSaveMap = () => {
+  store.triggerMapSave();
+};
+
 const handleThresholdChange = (val) => {
   store.sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: val});
   store.pushNotification('电池设置', `已发送低电量阈值设定: ${val}%`, 'info');
@@ -1769,6 +1774,10 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 0;
   line-height: 1.3;
+}
+
+.mode-btn-flat.full-row {
+  grid-column: 1 / -1;
 }
 
 .log-time {

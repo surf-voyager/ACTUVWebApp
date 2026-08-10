@@ -236,14 +236,6 @@
               </div>
             </div>
           </el-tab-pane>
-
-
-          <el-tab-pane label="地图" name="offline">
-             <button class="hud-btn success" @click="handleSaveMap">
-                <el-icon><MapLocation /></el-icon> 下载当前视野
-              </button>
-          </el-tab-pane>
-
         </el-tabs>
       </div>
     </div>
@@ -662,8 +654,6 @@ const handleMissionFileSelected = async (event) => {
     position: 'top-right'
   });
 };
-
-const handleSaveMap = () => store.triggerMapSave();
 
 // --- 区域规划 ---
 const generatePath = () => {
