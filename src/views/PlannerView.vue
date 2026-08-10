@@ -10,7 +10,7 @@
       <div class="panel-content-wrapper">
         <el-tabs v-model="activeTab" class="hud-tabs">
 
-          <el-tab-pane label="航线" name="mission">
+          <el-tab-pane label="航点规划" name="mission">
             <div class="tab-content">
 
               <div class="defaults-bar">
@@ -231,7 +231,7 @@
                   @click="handleGeofenceDownload"
                 >
                   <el-icon><Download /></el-icon>
-                  {{ geofence.download.phase === 'PENDING' ? '正在读取…' : '从飞控读取地理围栏' }}
+                  {{ geofence.download.phase === 'PENDING' ? '正在读取…' : '从飞控读取围栏' }}
                 </button>
               </div>
             </div>
@@ -677,7 +677,7 @@ const generatePath = () => {
     store.clearAreaPoints(); // 清理临时点
     store.triggerRedraw();
     ElMessage.success(`成功生成 ${waypoints.length} 个航点`);
-    activeTab.value = 'mission'; // 跳转回航线 tab
+    activeTab.value = 'mission'; // 跳转回航点规划 tab
 
   } catch (error) {
     console.error("路径生成失败:", error);
