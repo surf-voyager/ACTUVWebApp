@@ -11,6 +11,7 @@
         </keep-alive>
       </router-view>
       <LeakAlertOverlay />
+      <BatteryAlertOverlay />
 <!--      <div class="global-map-controls">-->
 <!--        <el-tooltip content="定位到船只" placement="left">-->
 <!--          <button class="control-btn" @click="handleFocusBoat">-->
@@ -46,6 +47,7 @@ import {useRouter} from 'vue-router'
 import {useGcsStore} from './store/useGcsStore'
 import BaseMap from './components/Map/BaseMap.vue'
 import LeakAlertOverlay from './components/Alert/LeakAlertOverlay.vue'
+import BatteryAlertOverlay from './components/Alert/BatteryAlertOverlay.vue'
 import {MapLocation, Monitor,Aim} from '@element-plus/icons-vue'
 import {disposeLeakAlarmAudio, primeLeakAlarmAudio} from './services/leakAlarmAudio'
 const mapRef = ref(null)

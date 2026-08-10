@@ -19,6 +19,7 @@ import {
     NOTIFICATION_TITLES,
     summarizeMissionSync
 } from '../services/systemNotifications'
+import {isBatteryAlertState} from '../services/batterySafety'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -59,12 +60,20 @@ export const useGcsStore = defineStore('gcs', () => {
         // 修改：适配新的电池数据结构
         battery: {
             voltage_v: 0,
-            remaining_percent: 0,
+            remaining_percent: null,
             current_a: 0.0,
             temperature: 0.0,
             alarms: [],
-            low_battery_threshold: 20, // 低电量阈值
-            is_low_battery_rtl_triggered: false  // 低电量返航状态
+            low_battery_threshold: 20,
+            data_valid: false,
+            data_state: 'STARTING',
+            fault_code: null,
+            last_valid_sample_age_s: null,
+            safety_state: 'STARTING',
+            alarm_id: 0,
+            return_status: 'IDLE',
+            return_message: null,
+            safety_return_lock: false
         },
         gps: {sats: 0, fix: 'No Fix'},
         health: {is_global_position_ok: false, is_home_position_ok: false, is_armable: false},
@@ -152,6 +161,20 @@ export const useGcsStore = defineStore('gcs', () => {
         rtlStatus: 'IDLE',
         rtlMessage: null
     });
+    const batteryThresholdConfig = reactive({
+        phase: 'IDLE',
+        pendingRequestId: null,
+        expectedValue: null,
+        error: null
+    });
+    const batteryAlert = reactive({
+        alarmId: 0,
+        soundSilenced: false,
+        communicationLost: false,
+        returnRequestId: null,
+        returnStatus: 'IDLE',
+        returnMessage: null
+    });
     const infoQuery = reactive({
         selectedId: 'PX4_POWER_VOLTAGE',
         phase: 'IDLE',
@@ -207,6 +230,8 @@ export const useGcsStore = defineStore('gcs', () => {
     const BACKEND_CHANNEL_STALE_MS = 1500;
     const LEAK_ALERT_LINGER_MS = 10000;
     const INFO_QUERY_TIMEOUT_MS = 6000;
+    const BATTERY_CONFIG_TIMEOUT_MS = 5000;
+    const BATTERY_RETURN_TIMEOUT_MS = 10000;
     const MISSION_CLEAR_TIMEOUT_MS = 10000;
     const GEOFENCE_OPERATION_TIMEOUT_MS = 15000;
     const PROPULSION_FEEDBACK_STALE_MS = 2000;
@@ -237,6 +262,8 @@ export const useGcsStore = defineStore('gcs', () => {
     };
     let leakWatchdogTimer = null;
     let leakRtlTimeout = null;
+    let batteryConfigTimeout = null;
+    let batteryReturnTimeout = null;
     let infoQueryTimeout = null;
     let waypointRadiusQueryTimeout = null;
     let waypointRadiusSetTimeout = null;
@@ -537,6 +564,7 @@ export const useGcsStore = defineStore('gcs', () => {
             console.log("后端连接成功!");
             isWsConnected.value = true;
             leakAlert.channelConnectedAt = monotonicNow();
+            batteryAlert.communicationLost = false;
             pushNotification(
                 NOTIFICATION_TITLES.onboard,
                 '连接成功',
@@ -589,6 +617,7 @@ export const useGcsStore = defineStore('gcs', () => {
             failPendingGeofenceOperations('后端连接已断开');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
+            markBatteryChannelDisconnected();
             pendingCommands.clear();
             socket = null;
             if (heartbeatTimer) {
@@ -631,6 +660,7 @@ export const useGcsStore = defineStore('gcs', () => {
             failPendingGeofenceOperations('后端连接异常');
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
+            markBatteryChannelDisconnected();
         };
     }
     
@@ -660,6 +690,7 @@ export const useGcsStore = defineStore('gcs', () => {
         failPendingGeofenceOperations('后端连接已断开');
         clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
+        markBatteryChannelDisconnected();
         pendingCommands.clear();
     }
 
@@ -843,6 +874,90 @@ export const useGcsStore = defineStore('gcs', () => {
         clearLeakRtlTimeout();
     }
 
+    function clearBatteryConfigTimeout() {
+        if (batteryConfigTimeout) clearTimeout(batteryConfigTimeout);
+        batteryConfigTimeout = null;
+    }
+
+    function clearBatteryReturnTimeout() {
+        if (batteryReturnTimeout) clearTimeout(batteryReturnTimeout);
+        batteryReturnTimeout = null;
+    }
+
+    function failPendingBatteryConfig(message) {
+        if (batteryThresholdConfig.phase !== 'PENDING') return;
+        pendingCommands.delete(batteryThresholdConfig.pendingRequestId);
+        clearBatteryConfigTimeout();
+        Object.assign(batteryThresholdConfig, {
+            phase: 'ERROR',
+            pendingRequestId: null,
+            expectedValue: null,
+            error: message
+        });
+        pushNotification('电池设置', message, 'error');
+    }
+
+    function failPendingBatteryReturn(message) {
+        if (batteryAlert.returnStatus !== 'PENDING') return;
+        pendingCommands.delete(batteryAlert.returnRequestId);
+        clearBatteryReturnTimeout();
+        batteryAlert.returnRequestId = null;
+        batteryAlert.returnStatus = 'ERROR';
+        batteryAlert.returnMessage = message;
+        pushNotification(NOTIFICATION_TITLES.returnHome, message, 'error');
+    }
+
+    function markBatteryChannelDisconnected() {
+        if (isBatteryAlertState(vehicle.battery.safety_state)) {
+            batteryAlert.communicationLost = true;
+        }
+        failPendingBatteryConfig('机载服务连接已断开，阈值配置结果未知');
+        failPendingBatteryReturn('机载服务连接已断开，无法确认返航结果');
+    }
+
+    function handleBatteryStatus(payload = {}) {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+        const incoming = {...payload};
+        const incomingThreshold = Number(incoming.low_battery_threshold);
+        delete incoming.low_battery_threshold;
+        Object.assign(vehicle.battery, incoming);
+
+        if (batteryThresholdConfig.phase !== 'PENDING'
+            && Number.isInteger(incomingThreshold)
+            && incomingThreshold >= 0
+            && incomingThreshold <= 100) {
+            vehicle.battery.low_battery_threshold = incomingThreshold;
+        }
+
+        const safetyState = String(vehicle.battery.safety_state || 'STARTING');
+        const alarmId = Number(vehicle.battery.alarm_id) || 0;
+        if (isBatteryAlertState(safetyState)) {
+            if (alarmId !== batteryAlert.alarmId) {
+                batteryAlert.alarmId = alarmId;
+                batteryAlert.soundSilenced = false;
+                batteryAlert.returnRequestId = null;
+                batteryAlert.returnStatus = 'IDLE';
+                batteryAlert.returnMessage = null;
+                clearBatteryReturnTimeout();
+            }
+            batteryAlert.communicationLost = false;
+            const preservePendingReturn = batteryAlert.returnRequestId
+                && batteryAlert.returnStatus === 'PENDING'
+                && vehicle.battery.return_status === 'IDLE';
+            if (vehicle.battery.return_status && !preservePendingReturn) {
+                batteryAlert.returnStatus = vehicle.battery.return_status;
+                batteryAlert.returnMessage = vehicle.battery.return_message || null;
+            }
+        } else {
+            batteryAlert.communicationLost = false;
+            batteryAlert.returnRequestId = null;
+            batteryAlert.returnStatus = 'IDLE';
+            batteryAlert.returnMessage = null;
+            batteryAlert.soundSilenced = false;
+            clearBatteryReturnTimeout();
+        }
+    }
+
 
     // --- 消息分发处理 ---
     function clearLivePosition(reason = 'POSITION_UNAVAILABLE') {
@@ -902,10 +1017,7 @@ export const useGcsStore = defineStore('gcs', () => {
                 vehicle.armed = payload.is_armed;
                 vehicle.armedKnown = payload.is_armed_known === true;
                 vehicle.mode = payload.flight_mode;
-                // 修改：直接赋值新的电池对象
-                if (payload.battery) {
-                    Object.assign(vehicle.battery, payload.battery);
-                }
+                if (payload.battery) handleBatteryStatus(payload.battery);
                 if (payload.gps) vehicle.gps = {sats: payload.gps.sat_count, fix: payload.gps.fix_type};
                 if (payload.health) Object.assign(vehicle.health, payload.health);
                 if (payload.home) {
@@ -1026,6 +1138,51 @@ export const useGcsStore = defineStore('gcs', () => {
         const notificationOptions = commandContext.notificationKey
             ? {key: commandContext.notificationKey, incrementCount: false}
             : {};
+        if (command_type === 'CMD_SET_BATTERY_THRESHOLD') {
+            if (request_id !== batteryThresholdConfig.pendingRequestId) return;
+            clearBatteryConfigTimeout();
+            batteryThresholdConfig.pendingRequestId = null;
+            batteryThresholdConfig.expectedValue = null;
+            if (!success) {
+                batteryThresholdConfig.phase = 'ERROR';
+                batteryThresholdConfig.error = message || '低电量阈值配置失败';
+                pushNotification('电池设置', batteryThresholdConfig.error, 'error');
+                return;
+            }
+            const threshold = Number(payload.threshold);
+            if (!Number.isInteger(threshold) || threshold < 0 || threshold > 100) {
+                batteryThresholdConfig.phase = 'ERROR';
+                batteryThresholdConfig.error = '后端返回的阈值无效';
+                pushNotification('电池设置', batteryThresholdConfig.error, 'error');
+                return;
+            }
+            vehicle.battery.low_battery_threshold = threshold;
+            batteryThresholdConfig.phase = 'SUCCESS';
+            batteryThresholdConfig.error = null;
+            pushNotification(
+                '电池设置',
+                threshold === 0 ? '低电量报警已禁用' : `低电量阈值已配置为 ${threshold}%`,
+                'success'
+            );
+            return;
+        }
+        if (command_type === 'CMD_RETURN_HOME'
+            && Number.isInteger(payload.alarm_id)) {
+            if (request_id !== batteryAlert.returnRequestId
+                || payload.alarm_id !== batteryAlert.alarmId) return;
+            clearBatteryReturnTimeout();
+            batteryAlert.returnRequestId = null;
+            batteryAlert.returnStatus = success ? 'SUCCESS' : 'ERROR';
+            batteryAlert.returnMessage = success
+                ? (message || '飞控已确认进入返航模式')
+                : localizeBackendError(message, '返航流程执行失败');
+            pushNotification(
+                NOTIFICATION_TITLES.returnHome,
+                batteryAlert.returnMessage,
+                success ? 'success' : 'error'
+            );
+            return;
+        }
         const geofenceCommands = {
             CMD_UPLOAD_GEOFENCE: 'upload',
             CMD_DOWNLOAD_GEOFENCE: 'download',
@@ -1658,6 +1815,76 @@ export const useGcsStore = defineStore('gcs', () => {
         return true;
     }
 
+    function configureBatteryThreshold(value) {
+        if (batteryThresholdConfig.phase === 'PENDING') return false;
+        if (!Number.isInteger(value) || value < 0 || value > 100) {
+            batteryThresholdConfig.phase = 'ERROR';
+            batteryThresholdConfig.error = '请输入 0～100 的整数';
+            pushNotification('电池设置', batteryThresholdConfig.error, 'warning');
+            return false;
+        }
+        const requestId = sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: value});
+        if (!requestId) return false;
+        Object.assign(batteryThresholdConfig, {
+            phase: 'PENDING',
+            pendingRequestId: requestId,
+            expectedValue: value,
+            error: null
+        });
+        clearBatteryConfigTimeout();
+        batteryConfigTimeout = setTimeout(() => {
+            if (batteryThresholdConfig.pendingRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
+            Object.assign(batteryThresholdConfig, {
+                phase: 'ERROR',
+                pendingRequestId: null,
+                expectedValue: null,
+                error: '配置请求超时，原阈值保持不变'
+            });
+            batteryConfigTimeout = null;
+            pushNotification('电池设置', batteryThresholdConfig.error, 'error');
+        }, BATTERY_CONFIG_TIMEOUT_MS);
+        return true;
+    }
+
+    function requestBatteryReturn() {
+        const safetyState = String(vehicle.battery.safety_state || 'STARTING');
+        if (!isBatteryAlertState(safetyState)) return false;
+        if (batteryAlert.returnStatus === 'PENDING') return false;
+        if (!isWsConnected.value) {
+            pushNotification(NOTIFICATION_TITLES.returnHome, '机载服务通信已断开，无法执行返航', 'error');
+            return false;
+        }
+        if (!vehicle.connected) {
+            pushNotification(NOTIFICATION_TITLES.returnHome, '飞控未连接，无法执行返航', 'error');
+            return false;
+        }
+
+        const reason = safetyState === 'DATA_FAULT'
+            ? 'BATTERY_DATA_FAULT'
+            : 'LOW_BATTERY';
+        const requestId = sendPacket('CMD_RETURN_HOME', {
+            reason,
+            alarm_id: batteryAlert.alarmId
+        });
+        if (!requestId) return false;
+        batteryAlert.soundSilenced = true;
+        batteryAlert.returnRequestId = requestId;
+        batteryAlert.returnStatus = 'PENDING';
+        batteryAlert.returnMessage = '正在请求返航…';
+        clearBatteryReturnTimeout();
+        batteryReturnTimeout = setTimeout(() => {
+            if (batteryAlert.returnRequestId !== requestId) return;
+            pendingCommands.delete(requestId);
+            batteryAlert.returnRequestId = null;
+            batteryAlert.returnStatus = 'ERROR';
+            batteryAlert.returnMessage = '返航请求超时，请重试';
+            pushNotification(NOTIFICATION_TITLES.returnHome, batteryAlert.returnMessage, 'error');
+            batteryReturnTimeout = null;
+        }, BATTERY_RETURN_TIMEOUT_MS);
+        return true;
+    }
+
     function sendSimplePacket(type, fields = {}) {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
             if (type !== 'control' && type !== 'heartbeat') {
@@ -1768,8 +1995,8 @@ export const useGcsStore = defineStore('gcs', () => {
 
     // --- 新增: 继电器控制 ---
     function setRelay(state) {
-        if (state && vehicle.battery.is_low_battery_rtl_triggered) {
-            pushNotification(NOTIFICATION_TITLES.safety, '低电量返航中，禁止开启混合搅拌器', 'warning');
+        if (state && vehicle.battery.safety_return_lock) {
+            pushNotification(NOTIFICATION_TITLES.safety, '安全返航进行中，禁止开启混合搅拌器', 'warning');
             return;
         }
         sendPacket('CMD_SET_RELAY', {state: state ? 1 : 0});
@@ -1869,6 +2096,8 @@ export const useGcsStore = defineStore('gcs', () => {
         notificationLogs,
         controlStatus,
         leakAlert,
+        batteryAlert,
+        batteryThresholdConfig,
         infoQuery,
         waypointAcceptanceRadius,
         ntripConfig,
@@ -1883,6 +2112,8 @@ export const useGcsStore = defineStore('gcs', () => {
         requestLocked,
         sendManualControl,
         requestLeakReturn,
+        requestBatteryReturn,
+        configureBatteryThreshold,
         requestMissionClear,
         setGeofencePoints,
         removeGeofencePoint,

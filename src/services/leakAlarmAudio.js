@@ -2,7 +2,7 @@ let audioContext = null;
 let masterGain = null;
 let alarmBuffer = null;
 let alarmSource = null;
-let alarmActive = false;
+const activeAlarmSources = new Set();
 
 const AudioContextClass = () => window.AudioContext || window.webkitAudioContext;
 
@@ -42,7 +42,8 @@ function createAlarmBuffer(context) {
 
 function startAlarmLoop() {
     const context = ensureAudioContext();
-    if (!context || !masterGain || !alarmActive || alarmSource || context.state !== 'running') return;
+    if (!context || !masterGain || activeAlarmSources.size === 0
+        || alarmSource || context.state !== 'running') return;
     if (!alarmBuffer) alarmBuffer = createAlarmBuffer(context);
     alarmSource = context.createBufferSource();
     alarmSource.buffer = alarmBuffer;
@@ -56,7 +57,7 @@ export async function primeLeakAlarmAudio() {
     if (!context) return false;
     try {
         if (context.state !== 'running') await context.resume();
-        if (alarmActive) startAlarmLoop();
+        if (activeAlarmSources.size > 0) startAlarmLoop();
         return context.state === 'running';
     } catch (error) {
         console.warn('浏览器阻止了漏水警报音频激活:', error);
@@ -65,13 +66,30 @@ export async function primeLeakAlarmAudio() {
 }
 
 export function startLeakAlarmAudio() {
-    if (alarmActive) return;
-    alarmActive = true;
-    void primeLeakAlarmAudio();
+    startSafetyAlarmAudio('LEAK');
 }
 
 export function stopLeakAlarmAudio() {
-    alarmActive = false;
+    stopSafetyAlarmAudio('LEAK');
+}
+
+export function startBatteryAlarmAudio() {
+    startSafetyAlarmAudio('LOW_BATTERY');
+}
+
+export function stopBatteryAlarmAudio() {
+    stopSafetyAlarmAudio('LOW_BATTERY');
+}
+
+export function startSafetyAlarmAudio(source) {
+    if (activeAlarmSources.has(source)) return;
+    activeAlarmSources.add(source);
+    void primeLeakAlarmAudio();
+}
+
+export function stopSafetyAlarmAudio(source) {
+    activeAlarmSources.delete(source);
+    if (activeAlarmSources.size > 0) return;
     if (alarmSource) {
         try {
             alarmSource.stop();
@@ -84,7 +102,8 @@ export function stopLeakAlarmAudio() {
 }
 
 export async function disposeLeakAlarmAudio() {
-    stopLeakAlarmAudio();
+    activeAlarmSources.clear();
+    stopSafetyAlarmAudio('__dispose__');
     if (audioContext) {
         try {
             await audioContext.close();

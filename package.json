@@ -12,7 +12,8 @@
     "test:mission-file": "node --test test/missionFile.test.mjs",
     "test:mission-completion": "node --test test/missionCompletion.test.mjs",
     "test:geofence": "node --test test/geofence.test.mjs test/geofenceFile.test.mjs",
-    "test:notifications": "node --test test/systemNotifications.test.mjs"
+    "test:notifications": "node --test test/systemNotifications.test.mjs",
+    "test:battery-safety": "node --test test/batterySafety.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

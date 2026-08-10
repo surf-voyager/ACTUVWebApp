@@ -146,16 +146,40 @@
           <div class="threshold-container">
             <div class="threshold-info">
               <span class="threshold-label">低电量返航阈值</span>
-              <span class="threshold-value">{{ vehicle.battery.low_battery_threshold }}%</span>
+              <span class="threshold-value">
+                {{ vehicle.battery.low_battery_threshold === 0
+                  ? '已禁用'
+                  : `${vehicle.battery.low_battery_threshold}%` }}
+              </span>
             </div>
-            <el-slider
-                v-model="vehicle.battery.low_battery_threshold"
-                :min="5"
-                :max="50"
-                :step="1"
-                @change="handleThresholdChange"
-                class="hud-slider"
-            />
+            <div class="threshold-config-row">
+              <input
+                v-model="batteryThresholdDraft"
+                class="threshold-input"
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                inputmode="numeric"
+                aria-label="低电量返航阈值"
+              >
+              <span class="threshold-unit">%</span>
+              <button
+                class="threshold-config-button"
+                :disabled="Boolean(batteryThresholdDisabledReason)"
+                :title="batteryThresholdDisabledReason"
+                @click="handleThresholdConfigure"
+              >
+                <el-icon v-if="batteryThresholdConfig.phase === 'PENDING'" class="is-loading">
+                  <Loading />
+                </el-icon>
+                {{ batteryThresholdConfig.phase === 'PENDING' ? '配置中' : '配置' }}
+              </button>
+            </div>
+            <span
+              class="threshold-status"
+              :class="batteryThresholdStatusClass"
+            >{{ batteryThresholdStatusText }}</span>
           </div>
         </section>
 
@@ -270,10 +294,14 @@
         <div class="telemetry-item">
           <span class="label">动力电池</span>
           <div class="val-group">
-            <span class="value" :style="{ color: getBatColor }">{{ vehicle.battery.remaining_percent ?? 0 }}%</span>
-            <div class="sub-label-wrap"><span class="sub-label">{{
-                (vehicle.battery.voltage_v ?? 0).toFixed(2)
-              }}V | {{ (vehicle.battery.current_a ?? 0).toFixed(1) }}A</span></div>
+            <span class="value" :style="{ color: getBatColor }">
+              {{ vehicle.battery.remaining_percent == null
+                ? '--'
+                : `${vehicle.battery.remaining_percent}%` }}
+            </span>
+            <div class="sub-label-wrap">
+              <span class="sub-label">{{ batteryElectricalText }}</span>
+            </div>
           </div>
         </div>
         <div class="divider"></div>
@@ -590,7 +618,11 @@
         <div class="safety-check-group">
           <div class="safety-check-item">
             <span class="label">低电量阈值</span>
-            <span class="value warning">{{ vehicle.battery.low_battery_threshold }}%</span>
+            <span class="value warning">
+              {{ vehicle.battery.low_battery_threshold === 0
+                ? '已禁用'
+                : `${vehicle.battery.low_battery_threshold}%` }}
+            </span>
           </div>
           <div class="safety-check-item">
             <span class="label">目标位置 (Target)</span>
@@ -646,6 +678,7 @@ import {
   missionHoldDisposition
 } from '../services/missionCompletion';
 import {NOTIFICATION_TITLES} from '../services/systemNotifications';
+import {parseBatteryThreshold} from '../services/batterySafety';
 
 const store = useGcsStore();
 const {
@@ -657,6 +690,7 @@ const {
   isWsConnected,
   wsUrl,
   controlStatus,
+  batteryThresholdConfig,
   infoQuery,
   waypointAcceptanceRadius,
   ntripConfig,
@@ -686,6 +720,38 @@ const ntripDialog = ref({
 });
 const manualWaypointIndex = ref(1);
 const controlState = ref({throttle: 0.0, steering: 0.0});
+const batteryThresholdDraft = ref('20');
+
+watch(() => vehicle.value.battery.low_battery_threshold, (value) => {
+  if (batteryThresholdConfig.value.phase !== 'PENDING'
+      && Number.isInteger(value)) {
+    batteryThresholdDraft.value = String(value);
+  }
+}, {immediate: true});
+
+const parsedBatteryThreshold = computed(() => {
+  return parseBatteryThreshold(batteryThresholdDraft.value);
+});
+const batteryThresholdDisabledReason = computed(() => {
+  if (batteryThresholdConfig.value.phase === 'PENDING') return '正在保存配置';
+  if (!isWsConnected.value) return '后端未连接';
+  if (parsedBatteryThreshold.value === null) return '请输入 0～100 的整数';
+  return '';
+});
+const batteryThresholdStatusText = computed(() => {
+  if (batteryThresholdConfig.value.phase === 'PENDING') return '正在写入后端配置…';
+  if (parsedBatteryThreshold.value === null) return '请输入 0～100 的整数';
+  if (batteryThresholdConfig.value.phase === 'ERROR') {
+    return batteryThresholdConfig.value.error || '配置失败';
+  }
+  if (batteryThresholdConfig.value.phase === 'SUCCESS') return '配置已保存并生效';
+  return '输入 0 可禁用低电量报警';
+});
+const batteryThresholdStatusClass = computed(() => (
+  parsedBatteryThreshold.value === null
+    ? 'error'
+    : batteryThresholdConfig.value.phase.toLowerCase()
+));
 
 // 计算倒序日志
 const reversedLogs = computed(() => [...(sysLogs.value || [])].reverse());
@@ -1105,9 +1171,20 @@ const propulsionFeedbackTitle = (name, channel) => {
 };
 
 const getBatColor = computed(() => {
+  if (!vehicle.value.battery.data_valid) return '#909399';
   const pct = vehicle.value.battery.remaining_percent;
   if (pct <= vehicle.value.battery.low_battery_threshold) return '#f56c6c';
   return pct > 30 ? '#67c23a' : '#e6a23c';
+});
+const batteryElectricalText = computed(() => {
+  const voltage = Number(vehicle.value.battery.voltage_v);
+  const current = Number(vehicle.value.battery.current_a);
+  if (!vehicle.value.battery.data_valid
+      || !Number.isFinite(voltage)
+      || !Number.isFinite(current)) {
+    return '--V | --A';
+  }
+  return `${voltage.toFixed(2)}V | ${current.toFixed(1)}A`;
 });
 
 const currentWaypointIndex = computed(() => mission.value.progress.total > 0 ? mission.value.progress.current + 1 : 0);
@@ -1379,13 +1456,9 @@ const handleSaveMap = () => {
   store.triggerMapSave();
 };
 
-const handleThresholdChange = (val) => {
-  store.sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: val}, {
-    pendingNotification: {
-      title: NOTIFICATION_TITLES.parameter,
-      message: `正在设置低电量阈值为 ${val}%…`
-    }
-  });
+const handleThresholdConfigure = () => {
+  if (batteryThresholdDisabledReason.value) return;
+  store.configureBatteryThreshold(parsedBatteryThreshold.value);
 };
 
 // 修复：HUD 鼠标滚轮横向滚动
@@ -1783,8 +1856,72 @@ onUnmounted(() => {
   color: #409EFF;
 }
 
-:deep(.hud-slider) {
-  padding: 0 4px;
+.threshold-config-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px 80px;
+  align-items: center;
+  gap: 6px;
+}
+
+.threshold-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  font-size: 13px;
+}
+
+.threshold-input:focus {
+  border-color: #409eff;
+}
+
+.threshold-unit {
+  color: #909399;
+  font-size: 12px;
+}
+
+.threshold-config-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid rgba(64, 158, 255, 0.55);
+  border-radius: 6px;
+  background: rgba(64, 158, 255, 0.22);
+  color: #d9ecff;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.threshold-config-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.threshold-status {
+  min-height: 14px;
+  color: #909399;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.threshold-status.success { color: #67c23a; }
+.threshold-status.error { color: #f56c6c; }
+.threshold-status.pending { color: #e6a23c; }
+
+.is-loading {
+  animation: threshold-spin 0.9s linear infinite;
+}
+
+@keyframes threshold-spin {
+  to { transform: rotate(360deg); }
 }
 
 .status-row {
