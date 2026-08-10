@@ -234,6 +234,16 @@
                   {{ geofence.download.phase === 'PENDING' ? '正在读取…' : '从飞控读取围栏' }}
                 </button>
               </div>
+              <div class="action-footer file-action-footer">
+                <button class="hud-btn secondary" @click="handleSaveGeofenceFile">
+                  <el-icon><Document /></el-icon> 保存围栏到文件
+                </button>
+                <button class="hud-btn secondary" @click="handleChooseGeofenceFile">
+                  <el-icon><FolderOpened /></el-icon> 从文件读取围栏
+                </button>
+                <input ref="geofenceFileInputRef" type="file" class="mission-file-input"
+                       accept=".json,application/json" @change="handleGeofenceFileSelected">
+              </div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -266,6 +276,11 @@ import {
   parseMissionFileDocument
 } from '../services/missionFile';
 import {
+  buildGeofenceFilename,
+  createGeofenceFileDocument,
+  parseGeofenceFileDocument
+} from '../services/geofenceFile';
+import {
   geofenceContainsHome,
   MAX_GEOFENCE_POINTS,
   normalizeGeofencePoints,
@@ -286,6 +301,7 @@ const isCollapsed = ref(false);
 const activeTab = ref('mission');
 const tableRef = ref(null);
 const missionFileInputRef = ref(null);
+const geofenceFileInputRef = ref(null);
 const acceptanceRadiusDraft = ref('');
 const MAX_MISSION_FILE_SIZE_BYTES = 1024 * 1024;
 const geofenceOperationPending = computed(() =>
@@ -651,6 +667,79 @@ const handleMissionFileSelected = async (event) => {
   ElNotification.success({
     title: '任务文件读取成功',
     message: `已载入 ${importedMission.waypoints.length} 个本地航点；如需写入 PX4，请点击“发送任务到飞控”`,
+    position: 'top-right'
+  });
+};
+
+const handleSaveGeofenceFile = () => {
+  try {
+    const geofenceDocument = createGeofenceFileDocument(geofence.value.points);
+    const jsonText = `${JSON.stringify(geofenceDocument, null, 2)}\n`;
+    const objectUrl = URL.createObjectURL(
+      new Blob([jsonText], {type: 'application/json;charset=utf-8'})
+    );
+    const link = window.document.createElement('a');
+    link.href = objectUrl;
+    link.download = buildGeofenceFilename();
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    ElMessage.success(`已保存包含 ${geofenceDocument.points.length} 个角点的围栏`);
+  } catch (error) {
+    ElMessage.error(error?.message || '围栏文件保存失败');
+  }
+};
+
+const handleChooseGeofenceFile = () => {
+  if (!geofenceFileInputRef.value) return;
+  geofenceFileInputRef.value.value = '';
+  geofenceFileInputRef.value.click();
+};
+
+const handleGeofenceFileSelected = async (event) => {
+  const input = event.target;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  let importedGeofence;
+  try {
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      throw new Error('请选择 JSON 格式的围栏文件');
+    }
+    if (file.size > MAX_MISSION_FILE_SIZE_BYTES) {
+      throw new Error('围栏文件不能超过 1 MB');
+    }
+    importedGeofence = parseGeofenceFileDocument(await file.text());
+  } catch (error) {
+    input.value = '';
+    ElMessage.error(error?.message || '围栏文件读取失败');
+    return;
+  }
+
+  if (geofence.value.points.length > 0) {
+    try {
+      await ElMessageBox.confirm(
+        '读取文件将完整替换当前前端本地围栏，尚未保存的修改会丢失。确定继续吗？',
+        '替换当前围栏',
+        {
+          confirmButtonText: '确认替换',
+          cancelButtonText: '取消',
+          type: 'warning',
+          customClass: 'hud-message-box'
+        }
+      );
+    } catch (_) {
+      input.value = '';
+      return;
+    }
+  }
+
+  store.setGeofencePoints(importedGeofence.points, 'LOCAL');
+  input.value = '';
+  ElNotification.success({
+    title: '围栏文件读取成功',
+    message: `已载入 ${importedGeofence.points.length} 个本地角点；如需写入 PX4，请点击“发送围栏到飞控”`,
     position: 'top-right'
   });
 };
