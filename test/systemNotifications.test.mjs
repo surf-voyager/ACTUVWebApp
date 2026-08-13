@@ -48,6 +48,26 @@ test('command acknowledgements use business-specific Chinese copy', () => {
     message: '飞控已切换至任务模式（MISSION）',
     type: 'success'
   });
+
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_SET_BATTERY_THRESHOLD',
+    success: true,
+    requestPayload: {threshold_voltage_v: 45.5}
+  }), {
+    title: NOTIFICATION_TITLES.parameter,
+    message: '低电压返航阈值已设为 45.5 V',
+    type: 'success'
+  });
+
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_SET_BATTERY_THRESHOLD',
+    success: true,
+    requestPayload: {threshold_voltage_v: 0}
+  }), {
+    title: NOTIFICATION_TITLES.parameter,
+    message: '低电压告警已禁用',
+    type: 'success'
+  });
 });
 
 test('failed acknowledgements preserve actionable backend details', () => {

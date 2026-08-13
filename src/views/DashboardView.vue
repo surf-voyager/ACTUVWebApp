@@ -144,11 +144,11 @@
           </div>
           <div class="threshold-container">
             <div class="threshold-info">
-              <span class="threshold-label">低电量返航阈值</span>
+              <span class="threshold-label">低电压返航阈值</span>
               <span class="threshold-value">
-                {{ vehicle.battery.low_battery_threshold === 0
+                {{ vehicle.battery.low_battery_threshold_voltage_v === 0
                   ? '已禁用'
-                  : `${vehicle.battery.low_battery_threshold}%` }}
+                  : `${vehicle.battery.low_battery_threshold_voltage_v.toFixed(1)} V` }}
               </span>
             </div>
             <div class="threshold-config-row">
@@ -158,11 +158,11 @@
                 type="number"
                 min="0"
                 max="100"
-                step="1"
-                inputmode="numeric"
-                aria-label="低电量返航阈值"
+                step="0.1"
+                inputmode="decimal"
+                aria-label="低电压返航阈值"
               >
-              <span class="threshold-unit">%</span>
+              <span class="threshold-unit">V</span>
               <button
                 class="threshold-config-button"
                 :disabled="Boolean(batteryThresholdDisabledReason)"
@@ -294,12 +294,10 @@
           <span class="label">动力电池</span>
           <div class="val-group">
             <span class="value" :style="{ color: getBatColor }">
-              {{ vehicle.battery.remaining_percent == null
-                ? '--'
-                : `${vehicle.battery.remaining_percent}%` }}
+              {{ batteryVoltageText }}
             </span>
             <div class="sub-label-wrap">
-              <span class="sub-label">{{ batteryElectricalText }}</span>
+              <span class="sub-label">{{ batteryAuxiliaryText }}</span>
             </div>
           </div>
         </div>
@@ -730,11 +728,11 @@
       <div class="mission-start-form">
         <div class="safety-check-group">
           <div class="safety-check-item">
-            <span class="label">低电量阈值</span>
+            <span class="label">低电压阈值</span>
             <span class="value warning">
-              {{ vehicle.battery.low_battery_threshold === 0
+              {{ vehicle.battery.low_battery_threshold_voltage_v === 0
                 ? '已禁用'
-                : `${vehicle.battery.low_battery_threshold}%` }}
+                : `${vehicle.battery.low_battery_threshold_voltage_v.toFixed(1)} V` }}
             </span>
           </div>
           <div class="safety-check-item">
@@ -792,7 +790,10 @@ import {
   missionHoldDisposition
 } from '../services/missionCompletion';
 import {NOTIFICATION_TITLES} from '../services/systemNotifications';
-import {parseBatteryThreshold} from '../services/batterySafety';
+import {
+  isLowBatteryState,
+  parseBatteryVoltageThreshold
+} from '../services/batterySafety';
 import {
   BACKEND_MAINTENANCE_ACTIONS,
   BACKEND_MAINTENANCE_EVENT,
@@ -842,7 +843,7 @@ const ntripDialog = ref({
 });
 const manualWaypointIndex = ref(1);
 const controlState = ref({throttle: 0.0, steering: 0.0});
-const batteryThresholdDraft = ref('20');
+const batteryThresholdDraft = ref('45.5');
 const backendMaintenance = reactive({
   expanded: false,
   action: null,
@@ -1029,30 +1030,30 @@ if (import.meta.hot) {
   import.meta.hot.on('vite:ws:disconnect', handleMaintenanceBridgeDisconnect);
 }
 
-watch(() => vehicle.value.battery.low_battery_threshold, (value) => {
+watch(() => vehicle.value.battery.low_battery_threshold_voltage_v, (value) => {
   if (batteryThresholdConfig.value.phase !== 'PENDING'
-      && Number.isInteger(value)) {
+      && Number.isFinite(value)) {
     batteryThresholdDraft.value = String(value);
   }
 }, {immediate: true});
 
 const parsedBatteryThreshold = computed(() => {
-  return parseBatteryThreshold(batteryThresholdDraft.value);
+  return parseBatteryVoltageThreshold(batteryThresholdDraft.value);
 });
 const batteryThresholdDisabledReason = computed(() => {
   if (batteryThresholdConfig.value.phase === 'PENDING') return '正在保存配置';
   if (!isWsConnected.value) return '后端未连接';
-  if (parsedBatteryThreshold.value === null) return '请输入 0～100 的整数';
+  if (parsedBatteryThreshold.value === null) return '请输入 0～100 V，最多一位小数';
   return '';
 });
 const batteryThresholdStatusText = computed(() => {
   if (batteryThresholdConfig.value.phase === 'PENDING') return '正在写入后端配置…';
-  if (parsedBatteryThreshold.value === null) return '请输入 0～100 的整数';
+  if (parsedBatteryThreshold.value === null) return '请输入 0～100 V，最多一位小数';
   if (batteryThresholdConfig.value.phase === 'ERROR') {
     return batteryThresholdConfig.value.error || '配置失败';
   }
   if (batteryThresholdConfig.value.phase === 'SUCCESS') return '配置已保存并生效';
-  return '输入 0 可禁用低电量报警';
+  return '输入 0 可禁用低电压告警';
 });
 const batteryThresholdStatusClass = computed(() => (
   parsedBatteryThreshold.value === null
@@ -1479,19 +1480,30 @@ const propulsionFeedbackTitle = (name, channel) => {
 
 const getBatColor = computed(() => {
   if (!vehicle.value.battery.data_valid) return '#909399';
-  const pct = vehicle.value.battery.remaining_percent;
-  if (pct <= vehicle.value.battery.low_battery_threshold) return '#f56c6c';
-  return pct > 30 ? '#67c23a' : '#e6a23c';
-});
-const batteryElectricalText = computed(() => {
   const voltage = Number(vehicle.value.battery.voltage_v);
-  const current = Number(vehicle.value.battery.current_a);
-  if (!vehicle.value.battery.data_valid
-      || !Number.isFinite(voltage)
-      || !Number.isFinite(current)) {
-    return '--V | --A';
+  const threshold = Number(vehicle.value.battery.low_battery_threshold_voltage_v);
+  if (!Number.isFinite(voltage) || voltage <= 0 || voltage > 100) return '#909399';
+  if (threshold === 0) return '#67c23a';
+  if (isLowBatteryState(vehicle.value.battery.safety_state) || voltage <= threshold) {
+    return '#f56c6c';
   }
-  return `${voltage.toFixed(2)}V | ${current.toFixed(1)}A`;
+  return voltage <= threshold + 1.0 ? '#e6a23c' : '#67c23a';
+});
+const batteryVoltageText = computed(() => {
+  const voltage = Number(vehicle.value.battery.voltage_v);
+  if (!vehicle.value.battery.data_valid || !Number.isFinite(voltage)) return '--';
+  return `${voltage.toFixed(2)} V`;
+});
+const batteryAuxiliaryText = computed(() => {
+  const soc = Number(vehicle.value.battery.remaining_percent);
+  const current = Number(vehicle.value.battery.current_a);
+  const socText = vehicle.value.battery.remaining_percent == null || !Number.isFinite(soc)
+    ? '--%'
+    : `${soc.toFixed(0)}%`;
+  const currentText = !vehicle.value.battery.data_valid || !Number.isFinite(current)
+    ? '--A'
+    : `${current.toFixed(1)} A`;
+  return `${socText} | ${currentText}`;
 });
 
 const currentWaypointIndex = computed(() => mission.value.progress.total > 0 ? mission.value.progress.current + 1 : 0);

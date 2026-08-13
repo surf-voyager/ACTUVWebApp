@@ -19,14 +19,14 @@ export const BATTERY_FAULT_MESSAGES = Object.freeze({
   BMS_SERIAL_UNAVAILABLE: '无法连接 BMS 串口',
   BMS_READ_FAILED: 'BMS 数据读取失败',
   BMS_DATA_STALE: '电池数据超过 5 秒未更新',
-  BMS_SOC_INVALID: 'BMS 返回的剩余电量无效'
+  BMS_VOLTAGE_INVALID: 'BMS 返回的动力电池总电压无效'
 })
 
-export function parseBatteryThreshold(value) {
+export function parseBatteryVoltageThreshold(value) {
   const text = String(value ?? '').trim()
-  if (!/^\d+$/.test(text)) return null
+  if (!/^(?:0|[1-9]\d*)(?:\.\d)?$/.test(text)) return null
   const threshold = Number(text)
-  return Number.isInteger(threshold) && threshold >= 0 && threshold <= 100
+  return Number.isFinite(threshold) && threshold >= 0 && threshold <= 100
     ? threshold
     : null
 }

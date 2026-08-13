@@ -19,7 +19,10 @@ import {
     NOTIFICATION_TITLES,
     summarizeMissionSync
 } from '../services/systemNotifications'
-import {isBatteryAlertState} from '../services/batterySafety'
+import {
+    isBatteryAlertState,
+    parseBatteryVoltageThreshold
+} from '../services/batterySafety'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -64,7 +67,7 @@ export const useGcsStore = defineStore('gcs', () => {
             current_a: 0.0,
             temperature: 0.0,
             alarms: [],
-            low_battery_threshold: 20,
+            low_battery_threshold_voltage_v: 45.5,
             data_valid: false,
             data_state: 'STARTING',
             fault_code: null,
@@ -918,15 +921,15 @@ export const useGcsStore = defineStore('gcs', () => {
     function handleBatteryStatus(payload = {}) {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
         const incoming = {...payload};
-        const incomingThreshold = Number(incoming.low_battery_threshold);
-        delete incoming.low_battery_threshold;
+        const incomingThreshold = parseBatteryVoltageThreshold(
+            incoming.low_battery_threshold_voltage_v
+        );
+        delete incoming.low_battery_threshold_voltage_v;
         Object.assign(vehicle.battery, incoming);
 
         if (batteryThresholdConfig.phase !== 'PENDING'
-            && Number.isInteger(incomingThreshold)
-            && incomingThreshold >= 0
-            && incomingThreshold <= 100) {
-            vehicle.battery.low_battery_threshold = incomingThreshold;
+            && incomingThreshold !== null) {
+            vehicle.battery.low_battery_threshold_voltage_v = incomingThreshold;
         }
 
         const safetyState = String(vehicle.battery.safety_state || 'STARTING');
@@ -1145,23 +1148,25 @@ export const useGcsStore = defineStore('gcs', () => {
             batteryThresholdConfig.expectedValue = null;
             if (!success) {
                 batteryThresholdConfig.phase = 'ERROR';
-                batteryThresholdConfig.error = message || '低电量阈值配置失败';
+                batteryThresholdConfig.error = message || '低电压返航阈值配置失败';
                 pushNotification('电池设置', batteryThresholdConfig.error, 'error');
                 return;
             }
-            const threshold = Number(payload.threshold);
-            if (!Number.isInteger(threshold) || threshold < 0 || threshold > 100) {
+            const threshold = parseBatteryVoltageThreshold(payload.threshold_voltage_v);
+            if (threshold === null) {
                 batteryThresholdConfig.phase = 'ERROR';
                 batteryThresholdConfig.error = '后端返回的阈值无效';
                 pushNotification('电池设置', batteryThresholdConfig.error, 'error');
                 return;
             }
-            vehicle.battery.low_battery_threshold = threshold;
+            vehicle.battery.low_battery_threshold_voltage_v = threshold;
             batteryThresholdConfig.phase = 'SUCCESS';
             batteryThresholdConfig.error = null;
             pushNotification(
                 '电池设置',
-                threshold === 0 ? '低电量报警已禁用' : `低电量阈值已配置为 ${threshold}%`,
+                threshold === 0
+                    ? '低电压告警已禁用'
+                    : `低电压返航阈值已配置为 ${threshold.toFixed(1)} V`,
                 'success'
             );
             return;
@@ -1817,18 +1822,21 @@ export const useGcsStore = defineStore('gcs', () => {
 
     function configureBatteryThreshold(value) {
         if (batteryThresholdConfig.phase === 'PENDING') return false;
-        if (!Number.isInteger(value) || value < 0 || value > 100) {
+        const threshold = parseBatteryVoltageThreshold(value);
+        if (threshold === null) {
             batteryThresholdConfig.phase = 'ERROR';
-            batteryThresholdConfig.error = '请输入 0～100 的整数';
+            batteryThresholdConfig.error = '请输入 0～100 V，最多一位小数';
             pushNotification('电池设置', batteryThresholdConfig.error, 'warning');
             return false;
         }
-        const requestId = sendPacket('CMD_SET_BATTERY_THRESHOLD', {threshold: value});
+        const requestId = sendPacket('CMD_SET_BATTERY_THRESHOLD', {
+            threshold_voltage_v: threshold
+        });
         if (!requestId) return false;
         Object.assign(batteryThresholdConfig, {
             phase: 'PENDING',
             pendingRequestId: requestId,
-            expectedValue: value,
+            expectedValue: threshold,
             error: null
         });
         clearBatteryConfigTimeout();

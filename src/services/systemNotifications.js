@@ -65,7 +65,7 @@ const COMMAND_FAILURE_MESSAGES = Object.freeze({
     CMD_CLEAR_MISSION: '任务清空失败',
     CMD_SET_HOME: '返航点设置失败',
     CMD_RETURN_HOME: '返航失败',
-    CMD_SET_BATTERY_THRESHOLD: '低电量阈值设置失败',
+    CMD_SET_BATTERY_THRESHOLD: '低电压返航阈值设置失败',
     CMD_SET_WAYPOINT_ACCEPTANCE_RADIUS: '航点接受半径配置失败',
     CMD_UPLOAD_GEOFENCE: '地理围栏发送失败',
     CMD_DOWNLOAD_GEOFENCE: '地理围栏读取失败',
@@ -153,7 +153,9 @@ export function formatCommandAck({commandType, success, message, requestPayload 
             displayMessage = '飞控已确认更新返航点';
             break;
         case 'CMD_SET_BATTERY_THRESHOLD':
-            displayMessage = `低电量阈值已设为 ${requestPayload.threshold}%`;
+            displayMessage = Number(requestPayload.threshold_voltage_v) === 0
+                ? '低电压告警已禁用'
+                : `低电压返航阈值已设为 ${Number(requestPayload.threshold_voltage_v).toFixed(1)} V`;
             break;
         case 'CMD_REBOOT':
             displayMessage = '飞控重启指令已发送';

@@ -15,8 +15,9 @@
       </div>
 
       <div class="battery-values">
+        <span>总电压 <strong>{{ voltageText }}</strong></span>
+        <span>低压阈值 <strong>{{ thresholdText }}</strong></span>
         <span>剩余电量 <strong>{{ remainingText }}</strong></span>
-        <span>报警阈值 <strong>{{ thresholdText }}</strong></span>
       </div>
 
       <div v-if="batteryAlert.communicationLost" class="communication-warning">
@@ -66,16 +67,20 @@ const routePositionClass = computed(() => (
 
 const alertTitle = computed(() => {
   if (vehicle.value.battery.safety_state === 'LOW_BATTERY_DATA_FAULT') {
-    return '低电量且电池数据异常';
+    return '低电压且电池数据异常';
   }
-  return isLowBattery.value ? '检测到低电量' : '电池数据异常';
+  return isLowBattery.value ? '检测到低电压' : '电池数据异常';
 });
 const alertDescription = computed(() => {
   if (batteryAlert.value.communicationLost) return '请检查机载服务连接，并评估是否返航';
   if (hasDataFault.value) {
     return `${batteryFaultMessage(vehicle.value.battery.fault_code)}，请检查 BMS 并评估是否返航`;
   }
-  return '剩余电量已连续达到报警阈值，请评估是否返航';
+  return '动力电池总电压已连续达到低压阈值，请评估是否返航';
+});
+const voltageText = computed(() => {
+  const value = Number(vehicle.value.battery.voltage_v);
+  return Number.isFinite(value) && value > 0 ? `${value.toFixed(2)} V` : '--';
 });
 const remainingText = computed(() => {
   const rawValue = vehicle.value.battery.remaining_percent;
@@ -84,8 +89,8 @@ const remainingText = computed(() => {
   return Number.isFinite(value) ? `${value.toFixed(0)}%` : '--';
 });
 const thresholdText = computed(() => {
-  const value = vehicle.value.battery.low_battery_threshold;
-  return value === 0 ? '已禁用' : `${value}%`;
+  const value = Number(vehicle.value.battery.low_battery_threshold_voltage_v);
+  return value === 0 ? '已禁用' : `${value.toFixed(1)} V`;
 });
 const returnButtonDisabled = computed(() => (
   batteryAlert.value.returnStatus === 'PENDING'
@@ -119,7 +124,7 @@ const confirmReturnToLaunch = async () => {
     await ElMessageBox.confirm(
       hasDataFault.value
         ? '当前无法确认电池数据。确认立即返航吗？必要时后端将自动解锁飞控。'
-        : '当前已确认低电量。确认立即返航吗？必要时后端将自动解锁飞控。',
+        : '当前已确认低电压。确认立即返航吗？必要时后端将自动解锁飞控。',
       '电池安全返航确认',
       {
         confirmButtonText: '确认返航',
@@ -131,7 +136,7 @@ const confirmReturnToLaunch = async () => {
     );
     store.requestBatteryReturn();
   } catch (_) {
-    // 暂不返航：保持面板；低电量声音继续播放。
+    // 暂不返航：保持面板；低电压声音继续播放。
   }
 };
 

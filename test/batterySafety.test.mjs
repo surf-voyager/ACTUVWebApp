@@ -6,15 +6,17 @@ import {
   isBatteryAlertState,
   isBatteryDataFaultState,
   isLowBatteryState,
-  parseBatteryThreshold,
+  parseBatteryVoltageThreshold,
 } from '../src/services/batterySafety.js'
 
-test('battery threshold accepts only integer text from 0 to 100', () => {
-  assert.equal(parseBatteryThreshold('0'), 0)
-  assert.equal(parseBatteryThreshold(20), 20)
-  assert.equal(parseBatteryThreshold('100'), 100)
-  for (const invalid of ['', '-1', '101', '2.5', 'abc', null]) {
-    assert.equal(parseBatteryThreshold(invalid), null)
+test('battery voltage threshold accepts 0 to 100 V with at most one decimal', () => {
+  assert.equal(parseBatteryVoltageThreshold('0'), 0)
+  assert.equal(parseBatteryVoltageThreshold(45), 45)
+  assert.equal(parseBatteryVoltageThreshold('45.5'), 45.5)
+  assert.equal(parseBatteryVoltageThreshold('100'), 100)
+  assert.equal(parseBatteryVoltageThreshold('100.0'), 100)
+  for (const invalid of ['', '-1', '100.1', '45.55', '1e1', 'abc', null]) {
+    assert.equal(parseBatteryVoltageThreshold(invalid), null)
   }
 })
 
@@ -28,5 +30,6 @@ test('battery alert states distinguish low battery and data faults', () => {
 
 test('battery fault messages are stable and localized', () => {
   assert.equal(batteryFaultMessage('BMS_DATA_STALE'), '电池数据超过 5 秒未更新')
+  assert.equal(batteryFaultMessage('BMS_VOLTAGE_INVALID'), 'BMS 返回的动力电池总电压无效')
   assert.equal(batteryFaultMessage('UNKNOWN'), '无法确认当前电池状态')
 })
