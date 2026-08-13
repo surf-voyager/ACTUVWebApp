@@ -71,7 +71,6 @@
               <el-button
                   type="primary"
                   class="info-query-button"
-                  :loading="infoQuery.phase === 'PENDING'"
                   :disabled="!isWsConnected || infoQuery.phase === 'PENDING' || waypointAcceptanceRadius.queryPhase === 'PENDING'"
                   @click="handleInfoQuery"
               >
@@ -538,7 +537,7 @@
                 <span>地址SSH连接测试</span>
                 <el-icon
                     v-if="maintenanceActionIsRunning('ssh-test')"
-                    class="maintenance-action-state is-loading"
+                    class="maintenance-action-state is-spinning"
                 ><Loading/></el-icon>
                 <el-icon
                     v-else-if="maintenanceSshValidated"
@@ -551,19 +550,45 @@
               </el-button>
               <el-button
                   class="maintenance-action"
-                  :loading="maintenanceActionIsRunning('check')"
                   :disabled="maintenanceBusy || !maintenanceSshValidated"
                   title="必须先通过当前地址的 SSH 连接测试"
                   @click="runBackendHealthCheck"
-              >检查后端服务</el-button>
+              >
+                <span>检查后端服务</span>
+                <el-icon
+                    v-if="maintenanceActionIsRunning('check')"
+                    class="maintenance-action-state is-spinning"
+                ><Loading/></el-icon>
+                <el-icon
+                    v-else-if="maintenanceActionSucceeded('check')"
+                    class="maintenance-action-state is-success"
+                ><CircleCheckFilled/></el-icon>
+                <el-icon
+                    v-else-if="maintenanceActionFailed('check')"
+                    class="maintenance-action-state is-error"
+                ><CircleCloseFilled/></el-icon>
+              </el-button>
               <el-button
                   class="maintenance-action"
                   type="danger"
-                  :loading="maintenanceActionIsRunning('restart')"
                   :disabled="maintenanceBusy || !maintenanceSshValidated"
                   title="必须先通过当前地址的 SSH 连接测试"
                   @click="confirmBackendRestart"
-              >重启后端服务</el-button>
+              >
+                <span>重启后端服务</span>
+                <el-icon
+                    v-if="maintenanceActionIsRunning('restart')"
+                    class="maintenance-action-state is-spinning"
+                ><Loading/></el-icon>
+                <el-icon
+                    v-else-if="maintenanceActionSucceeded('restart')"
+                    class="maintenance-action-state is-success"
+                ><CircleCheckFilled/></el-icon>
+                <el-icon
+                    v-else-if="maintenanceActionFailed('restart')"
+                    class="maintenance-action-state is-error"
+                ><CircleCloseFilled/></el-icon>
+              </el-button>
             </div>
 
             <div
@@ -889,6 +914,12 @@ watch(wsUrl, () => resetBackendMaintenance());
 
 const maintenanceActionIsRunning = (action) => (
   backendMaintenance.phase === 'running' && backendMaintenance.action === action
+);
+const maintenanceActionSucceeded = (action) => (
+  backendMaintenance.phase === 'success' && backendMaintenance.action === action
+);
+const maintenanceActionFailed = (action) => (
+  backendMaintenance.phase === 'error' && backendMaintenance.action === action
 );
 
 const startBackendMaintenanceAction = (action) => {
@@ -3171,6 +3202,14 @@ onUnmounted(() => {
 .maintenance-action-state {
   margin-left: 7px;
   font-size: 15px;
+}
+
+.maintenance-action-state.is-spinning {
+  animation: maintenance-state-spin 0.9s linear infinite;
+}
+
+@keyframes maintenance-state-spin {
+  to { transform: rotate(360deg); }
 }
 
 .maintenance-action-state.is-success { color: #67c23a; }
