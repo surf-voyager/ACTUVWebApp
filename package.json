@@ -14,7 +14,8 @@
     "test:geofence": "node --test test/geofence.test.mjs test/geofenceFile.test.mjs",
     "test:notifications": "node --test test/systemNotifications.test.mjs",
     "test:battery-safety": "node --test test/batterySafety.test.mjs",
-    "test:backend-maintenance": "node --test test/backendMaintenance.test.mjs"
+    "test:backend-maintenance": "node --test test/backendMaintenance.test.mjs",
+    "test:startup": "node --test test/startFrontend.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
