@@ -511,12 +511,100 @@
         </el-icon>
         <h2>连接已断开</h2>
         <p>正在尝试自动重连...</p>
-        <div class = "ws_disconnect_group panel-background">
-        <h3>当前连接地址</h3>
-       <p>{{wsUrl}}</p>
-        <el-button style="font-weight: 600; font-size: 16px" type="primary" link @click="openWsDialog">更改连接地址</el-button>
+        <div class="ws_disconnect_group panel-background">
+          <h3>当前连接地址</h3>
+          <p>{{ wsUrl }}</p>
+          <el-button class="offline-address-button" type="primary" link @click="openWsDialog">
+            更改连接地址
+          </el-button>
+          <el-button
+              class="maintenance-toggle"
+              type="primary"
+              link
+              @click="backendMaintenance.expanded = !backendMaintenance.expanded"
+          >{{ backendMaintenance.expanded ? '收起更多设置' : '更多设置' }}</el-button>
+
+          <div v-if="backendMaintenance.expanded" class="maintenance-panel">
+            <div class="maintenance-target">
+              SSH 目标：<strong>{{ maintenanceHost || 'WebSocket 地址无效' }}</strong>
+            </div>
+            <div class="maintenance-actions">
+              <el-button
+                  class="maintenance-action is-full"
+                  type="primary"
+                  :disabled="maintenanceBusy || !maintenanceHost"
+                  @click="runSshConnectionTest"
+              >
+                <span>地址SSH连接测试</span>
+                <el-icon
+                    v-if="maintenanceActionIsRunning('ssh-test')"
+                    class="maintenance-action-state is-loading"
+                ><Loading/></el-icon>
+                <el-icon
+                    v-else-if="maintenanceSshValidated"
+                    class="maintenance-action-state is-success"
+                ><CircleCheckFilled/></el-icon>
+                <el-icon
+                    v-else-if="backendMaintenance.action === 'ssh-test' && backendMaintenance.phase === 'error'"
+                    class="maintenance-action-state is-error"
+                ><CircleCloseFilled/></el-icon>
+              </el-button>
+              <el-button
+                  class="maintenance-action"
+                  :loading="maintenanceActionIsRunning('check')"
+                  :disabled="maintenanceBusy || !maintenanceSshValidated"
+                  title="必须先通过当前地址的 SSH 连接测试"
+                  @click="runBackendHealthCheck"
+              >检查后端服务</el-button>
+              <el-button
+                  class="maintenance-action"
+                  type="danger"
+                  :loading="maintenanceActionIsRunning('restart')"
+                  :disabled="maintenanceBusy || !maintenanceSshValidated"
+                  title="必须先通过当前地址的 SSH 连接测试"
+                  @click="confirmBackendRestart"
+              >重启后端服务</el-button>
+            </div>
+
+            <div
+                v-if="backendMaintenance.message"
+                class="maintenance-result"
+                :class="maintenanceResultClass"
+                role="status"
+                aria-live="polite"
+            >
+              <div class="maintenance-result-title">
+                <span>{{ backendMaintenance.message }}</span>
+                <span v-if="maintenanceDisplayedLevel" class="maintenance-level">
+                  {{ maintenanceLevelLabel(maintenanceDisplayedLevel) }}
+                </span>
+              </div>
+              <div v-if="backendMaintenance.connection" class="maintenance-device">
+                {{ backendMaintenance.connection.model }} · {{ backendMaintenance.connection.hostname }}
+              </div>
+              <div
+                  v-for="section in maintenanceHealthSections"
+                  :key="section.key"
+                  class="maintenance-health-section"
+              >
+                <div class="maintenance-section-title">{{ section.label }}</div>
+                <div
+                    v-for="row in section.rows"
+                    :key="row.key"
+                    class="maintenance-health-row"
+                >
+                  <span
+                      class="maintenance-health-dot"
+                      :class="row.ok ? 'is-ok' : row.warning ? 'is-warning' : 'is-error'"
+                  ></span>
+                  <span class="maintenance-health-label">{{ row.label }}</span>
+                  <span class="maintenance-health-value">{{ row.text }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        </div>
+      </div>
     </div>
 
     <!-- 弹窗统一样式 -->
@@ -653,13 +741,14 @@
 </template>
 
 <script setup>
-import {computed, onUnmounted, ref, watch} from 'vue';
+import {computed, onUnmounted, reactive, ref, watch} from 'vue';
 import {useGcsStore} from '../store/useGcsStore';
 import {storeToRefs} from 'pinia';
 import VirtualJoystick from '../components/Cockpit/VirtualJoystick.vue';
 import {
   Bell,
   CircleCheckFilled,
+  CircleCloseFilled,
   Document,
   Lightning,
   Link,
@@ -679,6 +768,14 @@ import {
 } from '../services/missionCompletion';
 import {NOTIFICATION_TITLES} from '../services/systemNotifications';
 import {parseBatteryThreshold} from '../services/batterySafety';
+import {
+  BACKEND_MAINTENANCE_ACTIONS,
+  BACKEND_MAINTENANCE_EVENT,
+  createMaintenanceRequestId,
+  extractWebSocketHost,
+  healthComponentRows,
+  maintenanceLevelLabel
+} from '../services/backendMaintenance';
 
 const store = useGcsStore();
 const {
@@ -721,6 +818,185 @@ const ntripDialog = ref({
 const manualWaypointIndex = ref(1);
 const controlState = ref({throttle: 0.0, steering: 0.0});
 const batteryThresholdDraft = ref('20');
+const backendMaintenance = reactive({
+  expanded: false,
+  action: null,
+  phase: 'idle',
+  stage: null,
+  requestId: null,
+  validatedHost: null,
+  message: '',
+  connection: null,
+  result: null
+});
+let backendMaintenanceTimeout = null;
+
+const maintenanceHost = computed(() => extractWebSocketHost(wsUrl.value));
+const maintenanceBusy = computed(() => backendMaintenance.phase === 'running');
+const maintenanceSshValidated = computed(() => (
+  Boolean(maintenanceHost.value)
+  && backendMaintenance.validatedHost === maintenanceHost.value
+));
+const maintenanceResultClass = computed(() => {
+  if (backendMaintenance.phase === 'running') return 'is-running';
+  if (backendMaintenance.phase === 'error') return 'is-error';
+  const health = backendMaintenance.result?.health || backendMaintenance.result?.after;
+  if (health?.level === 'degraded') return 'is-warning';
+  if (health?.level === 'unhealthy') return 'is-error';
+  return backendMaintenance.phase === 'success' ? 'is-success' : '';
+});
+const maintenanceDisplayedLevel = computed(() => (
+  backendMaintenance.result?.health?.level
+  || backendMaintenance.result?.after?.level
+  || null
+));
+const maintenanceHealthSections = computed(() => {
+  if (backendMaintenance.action === BACKEND_MAINTENANCE_ACTIONS.RESTART
+      && (backendMaintenance.result?.before || backendMaintenance.result?.after)) {
+    return [
+      backendMaintenance.result.before
+        ? {key: 'before', label: '重启前', rows: healthComponentRows(backendMaintenance.result.before)}
+        : null,
+      backendMaintenance.result.after
+        ? {key: 'after', label: '重启后', rows: healthComponentRows(backendMaintenance.result.after)}
+        : null
+    ].filter(Boolean);
+  }
+  const health = backendMaintenance.result?.health;
+  return health ? [{key: 'current', label: '当前状态', rows: healthComponentRows(health)}] : [];
+});
+
+const clearBackendMaintenanceTimeout = () => {
+  if (backendMaintenanceTimeout) clearTimeout(backendMaintenanceTimeout);
+  backendMaintenanceTimeout = null;
+};
+
+const resetBackendMaintenance = () => {
+  clearBackendMaintenanceTimeout();
+  Object.assign(backendMaintenance, {
+    action: null,
+    phase: 'idle',
+    stage: null,
+    requestId: null,
+    validatedHost: null,
+    message: '',
+    connection: null,
+    result: null
+  });
+};
+
+watch(wsUrl, () => resetBackendMaintenance());
+
+const maintenanceActionIsRunning = (action) => (
+  backendMaintenance.phase === 'running' && backendMaintenance.action === action
+);
+
+const startBackendMaintenanceAction = (action) => {
+  if (!maintenanceHost.value || maintenanceBusy.value) return;
+  if (action !== BACKEND_MAINTENANCE_ACTIONS.SSH_TEST && !maintenanceSshValidated.value) return;
+  if (!import.meta.hot) {
+    Object.assign(backendMaintenance, {
+      action,
+      phase: 'error',
+      message: 'SSH 运维桥接仅随 npm run dev 提供',
+      result: null
+    });
+    return;
+  }
+
+  clearBackendMaintenanceTimeout();
+  const requestId = createMaintenanceRequestId(action);
+  Object.assign(backendMaintenance, {
+    action,
+    phase: 'running',
+    stage: 'connecting',
+    requestId,
+    message: `正在通过 SSH 连接 ${maintenanceHost.value}…`,
+    result: null
+  });
+  import.meta.hot.send(`backend-maintenance:${action}`, {
+    request_id: requestId,
+    ws_url: wsUrl.value
+  });
+  const timeoutMs = action === BACKEND_MAINTENANCE_ACTIONS.RESTART ? 65_000 : 20_000;
+  backendMaintenanceTimeout = setTimeout(() => {
+    if (backendMaintenance.requestId !== requestId) return;
+    Object.assign(backendMaintenance, {
+      phase: 'error',
+      requestId: null,
+      message: '本地 SSH 运维桥接响应超时',
+      result: null
+    });
+    backendMaintenanceTimeout = null;
+  }, timeoutMs);
+};
+
+const runSshConnectionTest = () => startBackendMaintenanceAction(BACKEND_MAINTENANCE_ACTIONS.SSH_TEST);
+const runBackendHealthCheck = () => startBackendMaintenanceAction(BACKEND_MAINTENANCE_ACTIONS.CHECK);
+
+const confirmBackendRestart = async () => {
+  if (!maintenanceSshValidated.value || maintenanceBusy.value) return;
+  try {
+    await ElMessageBox.confirm(
+      '重启会中断当前控制并清理后端、MAVSDK 进程及相关端口。执行前请确认推进器和船体处于安全状态。',
+      '重启后端服务确认',
+      {
+        confirmButtonText: '确认重启',
+        cancelButtonText: '取消',
+        type: 'error',
+        customClass: 'hud-message-box'
+      }
+    );
+    startBackendMaintenanceAction(BACKEND_MAINTENANCE_ACTIONS.RESTART);
+  } catch (_) {
+    // 用户取消重启。
+  }
+};
+
+const handleBackendMaintenanceStatus = (payload = {}) => {
+  if (String(payload.request_id || '') !== backendMaintenance.requestId) return;
+  if (payload.phase === 'running') {
+    backendMaintenance.stage = payload.stage || backendMaintenance.stage;
+    backendMaintenance.message = String(payload.message || '正在执行远程运维操作…');
+    return;
+  }
+
+  clearBackendMaintenanceTimeout();
+  const action = backendMaintenance.action;
+  Object.assign(backendMaintenance, {
+    phase: payload.phase === 'success' ? 'success' : 'error',
+    stage: null,
+    requestId: null,
+    message: String(payload.message || '远程运维操作失败'),
+    connection: payload.connection || backendMaintenance.connection,
+    result: {
+      health: payload.health || null,
+      before: payload.before || null,
+      after: payload.after || null,
+      outcome: payload.outcome || null
+    }
+  });
+  if (action === BACKEND_MAINTENANCE_ACTIONS.SSH_TEST) {
+    backendMaintenance.validatedHost = payload.phase === 'success' ? maintenanceHost.value : null;
+  }
+};
+
+const handleMaintenanceBridgeDisconnect = () => {
+  const wasBusy = maintenanceBusy.value;
+  clearBackendMaintenanceTimeout();
+  Object.assign(backendMaintenance, {
+    phase: wasBusy ? 'error' : 'idle',
+    requestId: null,
+    validatedHost: null,
+    message: wasBusy ? '本地 SSH 运维桥接连接已断开' : '桥接服务已重连，请重新执行 SSH 测试',
+    result: null
+  });
+};
+
+if (import.meta.hot) {
+  import.meta.hot.on(BACKEND_MAINTENANCE_EVENT, handleBackendMaintenanceStatus);
+  import.meta.hot.on('vite:ws:disconnect', handleMaintenanceBridgeDisconnect);
+}
 
 watch(() => vehicle.value.battery.low_battery_threshold, (value) => {
   if (batteryThresholdConfig.value.phase !== 'PENDING'
@@ -1639,7 +1915,12 @@ const resetRightStick = () => controlState.value.steering = 0;
 
 onUnmounted(() => {
   resetNtripConnectionTest();
-  if (import.meta.hot) import.meta.hot.off('ntrip:test-status', handleNtripTestStatus);
+  clearBackendMaintenanceTimeout();
+  if (import.meta.hot) {
+    import.meta.hot.off('ntrip:test-status', handleNtripTestStatus);
+    import.meta.hot.off(BACKEND_MAINTENANCE_EVENT, handleBackendMaintenanceStatus);
+    import.meta.hot.off('vite:ws:disconnect', handleMaintenanceBridgeDisconnect);
+  }
   stopManualControlLoop();
   clearMissionHoldTimer();
   if (reconnectTimer) clearInterval(reconnectTimer);
@@ -2821,6 +3102,148 @@ onUnmounted(() => {
   border: none;
   font-weight: bold;
 }
+
+.offline-box {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  text-align: center;
+}
+
+.ws_disconnect_group {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.ws_disconnect_group h3 {
+  margin: 0 0 8px;
+}
+
+.ws_disconnect_group > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #aaa;
+}
+
+.offline-address-button {
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.maintenance-toggle {
+  display: block;
+  margin: 2px auto 0 !important;
+  color: #909399;
+}
+
+.maintenance-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.maintenance-target {
+  margin-bottom: 10px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.maintenance-target strong {
+  color: #dcdfe6;
+}
+
+.maintenance-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.maintenance-action {
+  width: 100%;
+  margin: 0 !important;
+}
+
+.maintenance-action.is-full {
+  grid-column: 1 / -1;
+}
+
+.maintenance-action-state {
+  margin-left: 7px;
+  font-size: 15px;
+}
+
+.maintenance-action-state.is-success { color: #67c23a; }
+.maintenance-action-state.is-error { color: #f56c6c; }
+
+.maintenance-result {
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid rgba(144, 147, 153, 0.35);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.28);
+  text-align: left;
+}
+
+.maintenance-result.is-running { border-color: rgba(64, 158, 255, 0.55); }
+.maintenance-result.is-success { border-color: rgba(103, 194, 58, 0.55); }
+.maintenance-result.is-warning { border-color: rgba(230, 162, 60, 0.6); }
+.maintenance-result.is-error { border-color: rgba(245, 108, 108, 0.6); }
+
+.maintenance-result-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  color: #e4e7ed;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.maintenance-level {
+  flex: 0 0 auto;
+  color: #909399;
+  font-size: 11px;
+}
+
+.maintenance-device {
+  margin-top: 5px;
+  color: #909399;
+  font-size: 11px;
+}
+
+.maintenance-health-section {
+  margin-top: 11px;
+}
+
+.maintenance-section-title {
+  margin-bottom: 5px;
+  color: #409eff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.maintenance-health-row {
+  display: grid;
+  grid-template-columns: 8px 78px minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+
+.maintenance-health-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #f56c6c;
+}
+
+.maintenance-health-dot.is-ok { background: #67c23a; }
+.maintenance-health-dot.is-warning { background: #e6a23c; }
+.maintenance-health-label { color: #c0c4cc; }
+.maintenance-health-value { color: #909399; overflow-wrap: anywhere; }
 
 .hud-btn-confirm.el-button--success {
   background: #67c23a;

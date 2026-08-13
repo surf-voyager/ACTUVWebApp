@@ -13,7 +13,8 @@
     "test:mission-completion": "node --test test/missionCompletion.test.mjs",
     "test:geofence": "node --test test/geofence.test.mjs test/geofenceFile.test.mjs",
     "test:notifications": "node --test test/systemNotifications.test.mjs",
-    "test:battery-safety": "node --test test/batterySafety.test.mjs"
+    "test:battery-safety": "node --test test/batterySafety.test.mjs",
+    "test:backend-maintenance": "node --test test/backendMaintenance.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -30,6 +31,7 @@
     "pouchdb": "^9.0.0",
     "sass": "^1.97.3",
     "sortablejs": "^1.15.6",
+    "ssh2": "^1.17.0",
     "vue": "^3.5.24",
     "vue-router": "^4.6.4"
   },
