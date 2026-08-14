@@ -23,6 +23,7 @@ import {
     isBatteryAlertState,
     parseBatteryVoltageThreshold
 } from '../services/batterySafety'
+import {formatDiskSpace, formatDiskUsageWarning} from '../services/diskSpace'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -186,6 +187,11 @@ export const useGcsStore = defineStore('gcs', () => {
         result: null,
         displayText: '请选择查询项目后点击查询'
     });
+    const diskUsageWarning = reactive({
+        connectionGeneration: 0,
+        pending: false,
+        message: null
+    });
     const waypointAcceptanceRadius = reactive({
         valueM: null,
         queried: false,
@@ -249,7 +255,8 @@ export const useGcsStore = defineStore('gcs', () => {
         PARSE_ERROR: '查询失败：无法解析飞控返回信息',
         BACKEND_DISCONNECTED: '查询失败：机载服务连接已断开',
         FRONTEND_TIMEOUT: '查询超时，请重试',
-        INVALID_RESULT: '查询失败：返回数据格式错误'
+        INVALID_RESULT: '查询失败：返回数据格式错误',
+        SYSTEM_ERROR: '查询失败：无法读取树莓派磁盘空间'
     };
     const INFO_QUERY_FORMATTERS = {
         PX4_POWER_VOLTAGE(data) {
@@ -261,6 +268,9 @@ export const useGcsStore = defineStore('gcs', () => {
             const radius = parseWaypointAcceptanceRadiusResponse(data);
             if (radius === null) throw new Error('INVALID_RESULT');
             return `航点接受半径：${radius.toFixed(1)}m`;
+        },
+        DISK_SPACE(data) {
+            return `磁盘剩余空间：${formatDiskSpace(data)}`;
         }
     };
     let leakWatchdogTimer = null;
@@ -566,6 +576,11 @@ export const useGcsStore = defineStore('gcs', () => {
             if (generation !== socketGeneration || socket !== nextSocket) return;
             console.log("后端连接成功!");
             isWsConnected.value = true;
+            Object.assign(diskUsageWarning, {
+                connectionGeneration: generation,
+                pending: false,
+                message: null
+            });
             leakAlert.channelConnectedAt = monotonicNow();
             batteryAlert.communicationLost = false;
             pushNotification(
@@ -1043,6 +1058,14 @@ export const useGcsStore = defineStore('gcs', () => {
                 break;
             case 'DATA_INFO_QUERY_RESULT':
                 handleInfoQueryResult(payload);
+                break;
+            case 'DATA_DISK_USAGE_WARNING':
+                try {
+                    diskUsageWarning.message = formatDiskUsageWarning(payload);
+                    diskUsageWarning.pending = true;
+                } catch {
+                    console.error('忽略格式错误的磁盘空间告警', payload);
+                }
                 break;
             case 'state': {
                 const previousState = controlStatus.state;
@@ -1631,6 +1654,16 @@ export const useGcsStore = defineStore('gcs', () => {
         return true;
     }
 
+    function acknowledgeDiskUsageWarning(connectionGeneration) {
+        if (connectionGeneration !== diskUsageWarning.connectionGeneration) return;
+        diskUsageWarning.pending = false;
+    }
+
+    function clearDiskUsageWarning(connectionGeneration) {
+        if (connectionGeneration !== diskUsageWarning.connectionGeneration) return;
+        diskUsageWarning.message = null;
+    }
+
     function finishBackgroundWaypointRadiusQuery(payload) {
         pendingCommands.delete(payload.request_id);
         if (waypointRadiusQueryTimeout) clearTimeout(waypointRadiusQueryTimeout);
@@ -2107,6 +2140,7 @@ export const useGcsStore = defineStore('gcs', () => {
         batteryAlert,
         batteryThresholdConfig,
         infoQuery,
+        diskUsageWarning,
         waypointAcceptanceRadius,
         ntripConfig,
         ntripStatus,
@@ -2129,6 +2163,8 @@ export const useGcsStore = defineStore('gcs', () => {
         requestGeofenceDownload,
         requestGeofenceClear,
         requestInformationQuery,
+        acknowledgeDiskUsageWarning,
+        clearDiskUsageWarning,
         requestWaypointAcceptanceRadius,
         setWaypointAcceptanceRadius,
         startLeakAlertWatchdog,

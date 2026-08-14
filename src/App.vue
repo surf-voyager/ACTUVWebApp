@@ -12,6 +12,26 @@
       </router-view>
       <LeakAlertOverlay />
       <BatteryAlertOverlay />
+      <el-dialog
+          :model-value="store.diskUsageWarning.pending"
+          title="磁盘空间告警"
+          width="480px"
+          class="hud-dialog disk-usage-warning-dialog"
+          align-center
+          append-to-body
+          :show-close="false"
+          :close-on-click-modal="false"
+          :close-on-press-escape="false"
+      >
+        <p class="disk-usage-warning-message">
+          {{ store.diskUsageWarning.message }}
+        </p>
+        <template #footer>
+          <el-button type="warning" @click="confirmDiskUsageWarning">
+            我知道了
+          </el-button>
+        </template>
+      </el-dialog>
 <!--      <div class="global-map-controls">-->
 <!--        <el-tooltip content="定位到船只" placement="left">-->
 <!--          <button class="control-btn" @click="handleFocusBoat">-->
@@ -82,6 +102,11 @@ watch(() => store.mapTriggers.saveCurrentMap, (newVal) => {
     handleSaveCurrentMap();
   }
 });
+const confirmDiskUsageWarning = () => {
+  const generation = store.diskUsageWarning.connectionGeneration;
+  store.acknowledgeDiskUsageWarning(generation);
+  store.clearDiskUsageWarning(generation);
+};
 const activateAlarmAudio = () => {
   void primeLeakAlarmAudio();
 };
@@ -153,6 +178,12 @@ html, body, #app {
   width: 100%;
   height: 100%;
   pointer-events: none;
+}
+
+.disk-usage-warning-message {
+  margin: 0;
+  line-height: 1.75;
+  color: #ddd;
 }
 
 /* --- 底部 Dock 栏 --- */

@@ -822,7 +822,8 @@ const {
 
 const infoQueryOptions = [
   {id: 'PX4_POWER_VOLTAGE', label: '飞控供电电压'},
-  {id: 'WAYPOINT_ACCEPTANCE_RADIUS', label: '航点接受半径'}
+  {id: 'WAYPOINT_ACCEPTANCE_RADIUS', label: '航点接受半径'},
+  {id: 'DISK_SPACE', label: '磁盘剩余空间'}
 ];
 
 // --- 状态变量 ---
