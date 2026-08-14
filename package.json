@@ -18,7 +18,8 @@
     "test:position": "node --test test/positionDisplay.test.mjs",
     "test:backend-maintenance": "node --test test/backendMaintenance.test.mjs",
     "test:system-maintenance": "node --test test/systemMaintenance.test.mjs",
-    "test:startup": "node --test test/startFrontend.test.mjs"
+    "test:startup": "node --test test/startFrontend.test.mjs",
+    "test:time-sync": "node --test test/systemTimeSync.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

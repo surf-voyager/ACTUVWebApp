@@ -22,6 +22,7 @@ const MODE_NAMES = Object.freeze({
 
 const COMMAND_TITLES = Object.freeze({
     CMD_CONNECT_VEHICLE: NOTIFICATION_TITLES.flightController,
+    CMD_SYNC_SYSTEM_TIME: NOTIFICATION_TITLES.system,
     CMD_GET_RECENT_LOGS: NOTIFICATION_TITLES.onboard,
     CMD_ARM: NOTIFICATION_TITLES.groundControl,
     CMD_DISARM: NOTIFICATION_TITLES.groundControl,
@@ -47,6 +48,7 @@ const COMMAND_TITLES = Object.freeze({
 
 const SILENT_SUCCESS_COMMANDS = new Set([
     'CMD_CONNECT_VEHICLE',
+    'CMD_SYNC_SYSTEM_TIME',
     'CMD_GET_RECENT_LOGS',
     'CMD_QUERY_INFO',
     'CMD_DOWNLOAD_MISSION',
@@ -54,6 +56,7 @@ const SILENT_SUCCESS_COMMANDS = new Set([
 ]);
 
 const COMMAND_FAILURE_MESSAGES = Object.freeze({
+    CMD_SYNC_SYSTEM_TIME: '树莓派系统时间同步失败',
     CMD_ARM: '飞控解锁失败',
     CMD_DISARM: '飞控上锁失败',
     CMD_SET_MODE: '飞控模式切换失败',

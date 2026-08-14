@@ -27,6 +27,7 @@ import {
 import {formatDiskSpace, formatDiskUsageWarning} from '../services/diskSpace'
 import {formatEkfHealth} from '../services/ekfHealth'
 import {normalizeGeofenceAlert} from '../services/geofenceAlert'
+import {buildSystemTimeSyncPayload} from '../services/systemTimeSync'
 import {
     CLEAR_LOGS_CONFIRM_TEXT,
     formatOperationalLogCleanup,
@@ -659,6 +660,20 @@ export const useGcsStore = defineStore('gcs', () => {
             if (reconnectTimer) {
                 clearTimeout(reconnectTimer);
                 reconnectTimer = null;
+            }
+            try {
+                sendPacket(
+                    "CMD_SYNC_SYSTEM_TIME",
+                    buildSystemTimeSyncPayload(),
+                    {silentSuccess: true}
+                );
+            } catch (error) {
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    error?.message || '无法读取浏览器系统时间',
+                    'warning',
+                    {key: 'time-sync:frontend', incrementCount: false}
+                );
             }
             sendPacket("CMD_CONNECT_VEHICLE", {}, {silent: true});
             sendPacket("CMD_GET_RECENT_LOGS", {}, {silent: true}); // 连接时获取历史日志

@@ -9,8 +9,21 @@ import {
 } from '../src/services/systemNotifications.js';
 
 test('automatic connection and mission download successes stay silent', () => {
-  assert.equal(formatCommandAck({commandType: 'CMD_CONNECT_VEHICLE', success: true}), null);
+    assert.equal(formatCommandAck({commandType: 'CMD_CONNECT_VEHICLE', success: true}), null);
+    assert.equal(formatCommandAck({commandType: 'CMD_SYNC_SYSTEM_TIME', success: true}), null);
   assert.equal(formatCommandAck({commandType: 'CMD_DOWNLOAD_MISSION', success: true}), null);
+});
+
+test('time synchronization failure is localized', () => {
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_SYNC_SYSTEM_TIME',
+    success: false,
+    message: 'helper failed'
+  }), {
+    title: NOTIFICATION_TITLES.system,
+    message: '树莓派系统时间同步失败',
+    type: 'error'
+  });
 });
 
 test('raw English backend errors do not leak into system notifications', () => {
