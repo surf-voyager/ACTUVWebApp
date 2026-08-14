@@ -206,8 +206,17 @@
             <span>系统维护</span>
           </div>
           <div class="mode-grid-flat">
-            <button class="mode-btn-flat small danger-text" @click="store.shutdownFcu">关动力分配</button>
-            <button class="mode-btn-flat small danger-text" @click="store.shutdownPi">关机载电脑</button>
+            <button
+              class="mode-btn-flat small danger-text"
+              :disabled="store.systemMaintenance.cleanupPending"
+              @click="store.clearOperationalLogs"
+            >清理磁盘空间</button>
+            <button
+              class="mode-btn-flat small danger-text"
+              :disabled="!store.canPowerOffOnboardSystem"
+              :title="store.powerOffBlockedReason || ''"
+              @click="store.powerOffOnboardSystem"
+            >机载系统断电</button>
           </div>
         </section>
       </div>

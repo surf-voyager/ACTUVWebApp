@@ -1,5 +1,5 @@
 import {defineStore} from 'pinia'
-import {reactive, ref} from 'vue'
+import {computed, reactive, ref} from 'vue'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {NtripClient} from '../services/ntripClient'
 import {
@@ -24,6 +24,13 @@ import {
     parseBatteryVoltageThreshold
 } from '../services/batterySafety'
 import {formatDiskSpace, formatDiskUsageWarning} from '../services/diskSpace'
+import {
+    CLEAR_LOGS_CONFIRM_TEXT,
+    formatOperationalLogCleanup,
+    onboardPowerOffBlockedReason,
+    POWER_OFF_CONFIRM_TEXT,
+    SYSTEM_MAINTENANCE_TIMEOUT_MS
+} from '../services/systemMaintenance'
 
 const MAVLINK_COORDINATE_SCALE = 10000000;
 const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
@@ -192,6 +199,23 @@ export const useGcsStore = defineStore('gcs', () => {
         pending: false,
         message: null
     });
+    const isWsConnected = ref(false);
+    const systemMaintenance = reactive({
+        cleanupPending: false,
+        cleanupRequestId: null,
+        powerOffPhase: 'IDLE',
+        powerOffRequestId: null
+    });
+    const powerOffBlockedReason = computed(() => onboardPowerOffBlockedReason({
+        backendConnected: isWsConnected.value,
+        px4Connected: vehicle.connected,
+        armedKnown: vehicle.armedKnown,
+        armed: vehicle.armed,
+        powerOffPhase: systemMaintenance.powerOffPhase
+    }));
+    const canPowerOffOnboardSystem = computed(
+        () => powerOffBlockedReason.value === null
+    );
     const waypointAcceptanceRadius = reactive({
         valueM: null,
         queried: false,
@@ -283,9 +307,20 @@ export const useGcsStore = defineStore('gcs', () => {
     let missionClearTimeout = null;
     let geofenceOperationTimeout = null;
     let propulsionFeedbackWatchdogTimer = null;
+    let cleanupOperationalLogsTimeout = null;
+    let onboardPowerOffTimeout = null;
     let requestSequence = 0;
 
     const monotonicNow = () => performance.now();
+
+    function resetLogCleanupState() {
+        if (cleanupOperationalLogsTimeout) {
+            clearTimeout(cleanupOperationalLogsTimeout);
+            cleanupOperationalLogsTimeout = null;
+        }
+        systemMaintenance.cleanupPending = false;
+        systemMaintenance.cleanupRequestId = null;
+    }
 
     function resetPropulsionFeedback(status = 'not_received') {
         for (const channelName of ['leftRear', 'rightRear', 'lateral']) {
@@ -554,7 +589,6 @@ export const useGcsStore = defineStore('gcs', () => {
     let socketGeneration = 0;
     const pendingCommands = new Map();
     let reconnectEnabled = true;
-    const isWsConnected = ref(false);
     const wsUrl = ref(localStorage.getItem('wsUrl') || 'ws://10.168.1.199:8765');
 
 
@@ -576,6 +610,10 @@ export const useGcsStore = defineStore('gcs', () => {
             if (generation !== socketGeneration || socket !== nextSocket) return;
             console.log("后端连接成功!");
             isWsConnected.value = true;
+            if (systemMaintenance.powerOffPhase === 'POWERED_OFF') {
+                systemMaintenance.powerOffPhase = 'IDLE';
+                systemMaintenance.powerOffRequestId = null;
+            }
             Object.assign(diskUsageWarning, {
                 connectionGeneration: generation,
                 pending: false,
@@ -624,12 +662,40 @@ export const useGcsStore = defineStore('gcs', () => {
 
         nextSocket.onclose = (event) => {
             if (generation !== socketGeneration || socket !== nextSocket) return;
+            const expectedPowerOff = [
+                'PENDING',
+                'AWAITING_DISCONNECT'
+            ].includes(systemMaintenance.powerOffPhase);
             console.warn("后端连接断开，3秒后重连...");
             isWsConnected.value = false;
             vehicle.connected = false;
             vehicle.armedKnown = false;
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
+            if (expectedPowerOff) {
+                resetLogCleanupState();
+                if (onboardPowerOffTimeout) {
+                    clearTimeout(onboardPowerOffTimeout);
+                    onboardPowerOffTimeout = null;
+                }
+                systemMaintenance.powerOffPhase = 'POWERED_OFF';
+                systemMaintenance.powerOffRequestId = null;
+                pendingCommands.clear();
+                socket = null;
+                reconnectEnabled = false;
+                if (heartbeatTimer) {
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    '机载系统已按预期断电；恢复供电请使用 BMS 手机 App',
+                    'success',
+                    {key: 'system:power-off', incrementCount: false}
+                );
+                return;
+            }
+            resetLogCleanupState();
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             failPendingMissionClear('后端连接已断开，本地航点已保留');
             failPendingGeofenceOperations('后端连接已断开');
@@ -671,6 +737,9 @@ export const useGcsStore = defineStore('gcs', () => {
             isWsConnected.value = false;
             vehicle.connected = false;
             vehicle.armedKnown = false;
+            if (['PENDING', 'AWAITING_DISCONNECT'].includes(systemMaintenance.powerOffPhase)) {
+                return;
+            }
             clearLivePosition('BACKEND_DISCONNECTED');
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
@@ -703,6 +772,7 @@ export const useGcsStore = defineStore('gcs', () => {
         vehicle.armedKnown = false;
         clearLivePosition('BACKEND_DISCONNECTED');
         resetPropulsionFeedback('backend_disconnected');
+        resetLogCleanupState();
         failPendingInfoQuery('BACKEND_DISCONNECTED');
         failPendingMissionClear('后端连接已断开，本地航点已保留');
         failPendingGeofenceOperations('后端连接已断开');
@@ -1164,6 +1234,51 @@ export const useGcsStore = defineStore('gcs', () => {
         const notificationOptions = commandContext.notificationKey
             ? {key: commandContext.notificationKey, incrementCount: false}
             : {};
+        if (command_type === 'CMD_CLEAR_OPERATIONAL_LOGS') {
+            if (request_id !== systemMaintenance.cleanupRequestId) return;
+            if (cleanupOperationalLogsTimeout) {
+                clearTimeout(cleanupOperationalLogsTimeout);
+                cleanupOperationalLogsTimeout = null;
+            }
+            systemMaintenance.cleanupPending = false;
+            systemMaintenance.cleanupRequestId = null;
+            const failedCount = Math.max(0, Number(payload.failed_count) || 0);
+            pushNotification(
+                NOTIFICATION_TITLES.system,
+                success || failedCount
+                    ? formatOperationalLogCleanup(payload)
+                    : localizeBackendError(message, '运行日志清理失败'),
+                success ? 'success' : (failedCount ? 'warning' : 'error'),
+                notificationOptions
+            );
+            return;
+        }
+        if (command_type === 'CMD_POWER_OFF_ONBOARD_SYSTEM') {
+            if (request_id !== systemMaintenance.powerOffRequestId) return;
+            if (!success) {
+                if (onboardPowerOffTimeout) {
+                    clearTimeout(onboardPowerOffTimeout);
+                    onboardPowerOffTimeout = null;
+                }
+                systemMaintenance.powerOffPhase = 'ERROR';
+                systemMaintenance.powerOffRequestId = null;
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    localizeBackendError(message, '机载系统断电失败'),
+                    'error',
+                    notificationOptions
+                );
+                return;
+            }
+            systemMaintenance.powerOffPhase = 'AWAITING_DISCONNECT';
+            pushNotification(
+                NOTIFICATION_TITLES.system,
+                'BMS 已确认关闭放电，等待机载连接断开…',
+                'warning',
+                notificationOptions
+            );
+            return;
+        }
         if (command_type === 'CMD_SET_BATTERY_THRESHOLD') {
             if (request_id !== batteryThresholdConfig.pendingRequestId) return;
             clearBatteryConfigTimeout();
@@ -2084,46 +2199,123 @@ export const useGcsStore = defineStore('gcs', () => {
 
 
     // --- 新增: 系统控制 ---
-    function shutdownPi() {
+    function clearOperationalLogs() {
+        if (systemMaintenance.cleanupPending) return false;
         ElMessageBox.confirm(
-            '确定要关闭树莓派吗？这将导致地面站断开连接。',
-            '系统关机确认',
+            '将删除全部已关闭的开机日志和任务日志；正在写入的活动日志会保留，删除不可撤销。',
+            '清理磁盘空间确认',
             {
-                confirmButtonText: '确定关机',
+                confirmButtonText: '继续',
                 cancelButtonText: '取消',
                 type: 'warning',
                 customClass: 'hud-message-box'
             }
         ).then(() => {
-            sendPacket('CMD_SHUTDOWN_PI', {}, {
+            return ElMessageBox.prompt(
+                `请输入 ${CLEAR_LOGS_CONFIRM_TEXT} 继续清理`,
+                '再次确认清理日志',
+                {
+                    confirmButtonText: '确认清理',
+                    cancelButtonText: '取消',
+                    inputValidator: value => value === CLEAR_LOGS_CONFIRM_TEXT
+                        || `请输入 ${CLEAR_LOGS_CONFIRM_TEXT}`,
+                    type: 'warning',
+                    customClass: 'hud-message-box'
+                }
+            );
+        }).then(() => {
+            const requestId = sendPacket('CMD_CLEAR_OPERATIONAL_LOGS', {}, {
                 pendingNotification: {
                     title: NOTIFICATION_TITLES.system,
-                    message: '正在关闭机载计算机…',
+                    message: '正在清理已关闭的运行日志…',
                     type: 'warning'
                 }
             });
+            if (!requestId) return false;
+            systemMaintenance.cleanupPending = true;
+            systemMaintenance.cleanupRequestId = requestId;
+            cleanupOperationalLogsTimeout = setTimeout(() => {
+                if (systemMaintenance.cleanupRequestId !== requestId) return;
+                pendingCommands.delete(requestId);
+                systemMaintenance.cleanupPending = false;
+                systemMaintenance.cleanupRequestId = null;
+                cleanupOperationalLogsTimeout = null;
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    '日志清理请求超时，结果未知',
+                    'warning'
+                );
+            }, SYSTEM_MAINTENANCE_TIMEOUT_MS);
+            return true;
         }).catch(() => {});
+        return true;
     }
 
-    function shutdownFcu() {
+    function powerOffOnboardSystem() {
+        const blockedReason = powerOffBlockedReason.value;
+        if (blockedReason) {
+            pushNotification(NOTIFICATION_TITLES.system, blockedReason, 'warning');
+            return false;
+        }
         ElMessageBox.confirm(
-            '确定要关闭飞控吗？',
-            '飞控关机确认',
+            '该操作将关闭 BMS 放电并立即切断整套机载系统供电。恢复供电必须使用 BMS 手机 App。',
+            '机载系统断电确认',
             {
-                confirmButtonText: '确定关机',
+                confirmButtonText: '继续',
                 cancelButtonText: '取消',
                 type: 'warning',
                 customClass: 'hud-message-box'
             }
         ).then(() => {
-            sendPacket('CMD_SHUTDOWN_FCU', {}, {
+            return ElMessageBox.prompt(
+                `请输入 ${POWER_OFF_CONFIRM_TEXT} 继续断电`,
+                '最终断电确认',
+                {
+                    confirmButtonText: '确认断电',
+                    cancelButtonText: '取消',
+                    inputValidator: value => value === POWER_OFF_CONFIRM_TEXT
+                        || `请输入 ${POWER_OFF_CONFIRM_TEXT}`,
+                    type: 'error',
+                    customClass: 'hud-message-box'
+                }
+            );
+        }).then(() => {
+            if (powerOffBlockedReason.value) {
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    powerOffBlockedReason.value,
+                    'error'
+                );
+                return false;
+            }
+            systemMaintenance.powerOffPhase = 'PENDING';
+            const requestId = sendPacket('CMD_POWER_OFF_ONBOARD_SYSTEM', {}, {
                 pendingNotification: {
                     title: NOTIFICATION_TITLES.system,
-                    message: '正在关闭飞控…',
+                    message: '正在向 BMS 发送关闭放电指令…',
                     type: 'warning'
                 }
             });
+            if (!requestId) {
+                systemMaintenance.powerOffPhase = 'ERROR';
+                return false;
+            }
+            systemMaintenance.powerOffRequestId = requestId;
+            onboardPowerOffTimeout = setTimeout(() => {
+                if (systemMaintenance.powerOffRequestId !== requestId) return;
+                pendingCommands.delete(requestId);
+                systemMaintenance.powerOffPhase = 'ERROR';
+                systemMaintenance.powerOffRequestId = null;
+                onboardPowerOffTimeout = null;
+                pushNotification(
+                    NOTIFICATION_TITLES.system,
+                    '断电结果未确认，请检查机载系统和 BMS 手机 App',
+                    'warning'
+                );
+            }, SYSTEM_MAINTENANCE_TIMEOUT_MS);
+            return true;
         }).catch(() => {});
+        return true;
     }
 
     return {
@@ -2141,6 +2333,9 @@ export const useGcsStore = defineStore('gcs', () => {
         batteryThresholdConfig,
         infoQuery,
         diskUsageWarning,
+        systemMaintenance,
+        powerOffBlockedReason,
+        canPowerOffOnboardSystem,
         waypointAcceptanceRadius,
         ntripConfig,
         ntripStatus,
@@ -2187,7 +2382,7 @@ export const useGcsStore = defineStore('gcs', () => {
         clearAreaPoints,
         setHome,
         setGotoTargetCandidate,
-        shutdownPi,
-        shutdownFcu
+        clearOperationalLogs,
+        powerOffOnboardSystem
     }
 })

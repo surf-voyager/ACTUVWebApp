@@ -40,8 +40,8 @@ const COMMAND_TITLES = Object.freeze({
     CMD_DOWNLOAD_GEOFENCE: NOTIFICATION_TITLES.geofence,
     CMD_CLEAR_GEOFENCE: NOTIFICATION_TITLES.geofence,
     CMD_REBOOT: NOTIFICATION_TITLES.system,
-    CMD_SHUTDOWN_PI: NOTIFICATION_TITLES.system,
-    CMD_SHUTDOWN_FCU: NOTIFICATION_TITLES.system,
+    CMD_CLEAR_OPERATIONAL_LOGS: NOTIFICATION_TITLES.system,
+    CMD_POWER_OFF_ONBOARD_SYSTEM: NOTIFICATION_TITLES.system,
     CMD_SET_RELAY: NOTIFICATION_TITLES.system
 });
 
@@ -71,8 +71,8 @@ const COMMAND_FAILURE_MESSAGES = Object.freeze({
     CMD_DOWNLOAD_GEOFENCE: '地理围栏读取失败',
     CMD_CLEAR_GEOFENCE: '地理围栏清空失败',
     CMD_REBOOT: '飞控重启失败',
-    CMD_SHUTDOWN_PI: '机载计算机关机失败',
-    CMD_SHUTDOWN_FCU: '飞控关机失败',
+    CMD_CLEAR_OPERATIONAL_LOGS: '运行日志清理失败',
+    CMD_POWER_OFF_ONBOARD_SYSTEM: '机载系统断电失败',
     CMD_SET_RELAY: '混合器控制失败'
 });
 
@@ -160,11 +160,11 @@ export function formatCommandAck({commandType, success, message, requestPayload 
         case 'CMD_REBOOT':
             displayMessage = '飞控重启指令已发送';
             break;
-        case 'CMD_SHUTDOWN_PI':
-            displayMessage = '机载计算机关机指令已执行';
+        case 'CMD_CLEAR_OPERATIONAL_LOGS':
+            displayMessage = '已清理关闭的运行日志';
             break;
-        case 'CMD_SHUTDOWN_FCU':
-            displayMessage = '飞控关机指令已发送';
+        case 'CMD_POWER_OFF_ONBOARD_SYSTEM':
+            displayMessage = 'BMS 已确认关闭放电指令';
             break;
         default:
             displayMessage = '操作已完成';

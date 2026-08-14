@@ -37,11 +37,26 @@
       <div class="system-controls">
         <div class="status-label" style="margin-bottom: 8px;">系统控制</div>
         <div class="control-btns">
-          <el-button type="danger" size="small" :icon="SwitchButton" @click="store.shutdownPi" plain>
-            关闭 RPi
+          <el-button
+            type="danger"
+            size="small"
+            :icon="Delete"
+            :loading="systemMaintenance.cleanupPending"
+            @click="store.clearOperationalLogs"
+            plain
+          >
+            清理日志
           </el-button>
-          <el-button type="danger" size="small" :icon="VideoPause" @click="store.shutdownFcu" plain>
-            关闭 FCU
+          <el-button
+            type="danger"
+            size="small"
+            :icon="SwitchButton"
+            :disabled="!canPowerOffOnboardSystem"
+            :title="powerOffBlockedReason || ''"
+            @click="store.powerOffOnboardSystem"
+            plain
+          >
+            系统断电
           </el-button>
         </div>
       </div>
@@ -71,10 +86,17 @@
 import { ref, computed } from 'vue';
 import { useGcsStore } from '../../store/useGcsStore';
 import { storeToRefs } from 'pinia';
-import { Link, SwitchButton, VideoPause } from '@element-plus/icons-vue';
+import { Delete, Link, SwitchButton } from '@element-plus/icons-vue';
 
 const store = useGcsStore();
-const { vehicle, isWsConnected, wsUrl } = storeToRefs(store);
+const {
+  vehicle,
+  isWsConnected,
+  wsUrl,
+  systemMaintenance,
+  powerOffBlockedReason,
+  canPowerOffOnboardSystem
+} = storeToRefs(store);
 
 const isDialogVisible = ref(false);
 const newWsAddress = ref('');

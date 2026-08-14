@@ -82,6 +82,26 @@ test('failed acknowledgements preserve actionable backend details', () => {
   });
 });
 
+test('system maintenance acknowledgements use the new command semantics', () => {
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_CLEAR_OPERATIONAL_LOGS',
+    success: true
+  }), {
+    title: NOTIFICATION_TITLES.system,
+    message: '已清理关闭的运行日志',
+    type: 'success'
+  });
+  assert.deepEqual(formatCommandAck({
+    commandType: 'CMD_POWER_OFF_ONBOARD_SYSTEM',
+    success: false,
+    message: 'PX4 已解锁，请先上锁再执行机载系统断电'
+  }), {
+    title: NOTIFICATION_TITLES.system,
+    message: 'PX4 已解锁，请先上锁再执行机载系统断电',
+    type: 'error'
+  });
+});
+
 test('mission synchronization reports received and valid item counts once', () => {
   assert.deepEqual(summarizeMissionSync(0, 0), {
     message: '飞控中没有任务航点',
