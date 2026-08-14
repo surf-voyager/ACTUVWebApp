@@ -24,6 +24,7 @@ import {
     parseBatteryVoltageThreshold
 } from '../services/batterySafety'
 import {formatDiskSpace, formatDiskUsageWarning} from '../services/diskSpace'
+import {formatEkfHealth} from '../services/ekfHealth'
 import {
     CLEAR_LOGS_CONFIRM_TEXT,
     formatOperationalLogCleanup,
@@ -295,6 +296,9 @@ export const useGcsStore = defineStore('gcs', () => {
         },
         DISK_SPACE(data) {
             return `磁盘剩余空间：${formatDiskSpace(data)}`;
+        },
+        EKF_HEALTH(data) {
+            return formatEkfHealth(data);
         }
     };
     let leakWatchdogTimer = null;

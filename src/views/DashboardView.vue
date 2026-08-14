@@ -79,7 +79,10 @@
             </div>
             <div
                 class="info-query-result"
-                :class="`is-${infoQuery.phase.toLowerCase()}`"
+                :class="[
+                  `is-${infoQuery.phase.toLowerCase()}`,
+                  {'is-unhealthy': infoQuery.phase === 'SUCCESS' && infoQuery.result?.healthy === false}
+                ]"
                 role="status"
                 aria-live="polite"
             >
@@ -837,7 +840,8 @@ const {
 const infoQueryOptions = [
   {id: 'PX4_POWER_VOLTAGE', label: '飞控供电电压'},
   {id: 'WAYPOINT_ACCEPTANCE_RADIUS', label: '航点接受半径'},
-  {id: 'DISK_SPACE', label: '磁盘剩余空间'}
+  {id: 'DISK_SPACE', label: '磁盘剩余空间'},
+  {id: 'EKF_HEALTH', label: 'EKF健康状态'}
 ];
 
 const displayedFlightMode = computed(() =>
@@ -2174,6 +2178,11 @@ onUnmounted(() => {
 }
 
 .info-query-result.is-error {
+  color: #f56c6c;
+  border-color: rgba(245, 108, 108, 0.35);
+}
+
+.info-query-result.is-unhealthy {
   color: #f56c6c;
   border-color: rgba(245, 108, 108, 0.35);
 }
