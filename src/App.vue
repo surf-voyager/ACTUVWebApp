@@ -12,6 +12,7 @@
       </router-view>
       <LeakAlertOverlay />
       <BatteryAlertOverlay />
+      <GeofenceBreachOverlay />
       <el-dialog
           :model-value="store.diskUsageWarning.pending"
           title="磁盘空间告警"
@@ -68,6 +69,7 @@ import {useGcsStore} from './store/useGcsStore'
 import BaseMap from './components/Map/BaseMap.vue'
 import LeakAlertOverlay from './components/Alert/LeakAlertOverlay.vue'
 import BatteryAlertOverlay from './components/Alert/BatteryAlertOverlay.vue'
+import GeofenceBreachOverlay from './components/Alert/GeofenceBreachOverlay.vue'
 import {MapLocation, Monitor,Aim} from '@element-plus/icons-vue'
 import {disposeLeakAlarmAudio, primeLeakAlarmAudio} from './services/leakAlarmAudio'
 const mapRef = ref(null)

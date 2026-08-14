@@ -81,6 +81,14 @@ export function stopBatteryAlarmAudio() {
     stopSafetyAlarmAudio('LOW_BATTERY');
 }
 
+export function startGeofenceAlarmAudio() {
+    startSafetyAlarmAudio('GEOFENCE');
+}
+
+export function stopGeofenceAlarmAudio() {
+    stopSafetyAlarmAudio('GEOFENCE');
+}
+
 export function startSafetyAlarmAudio(source) {
     if (activeAlarmSources.has(source)) return;
     activeAlarmSources.add(source);

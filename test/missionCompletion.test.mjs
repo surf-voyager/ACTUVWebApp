@@ -42,3 +42,14 @@ test('late HOLD and unrelated states are ignored', () => {
     elapsedSinceStartMs: 1000,
   }), MISSION_HOLD_DISPOSITION.IGNORE)
 })
+
+test('geofence breach always suppresses automatic mission recovery', () => {
+  assert.equal(missionHoldDisposition({
+    flightMode: 'HOLD',
+    missionState: 'EXECUTING',
+    current: 0,
+    total: 3,
+    elapsedSinceStartMs: 1200,
+    geofenceAlertActive: true,
+  }), MISSION_HOLD_DISPOSITION.IGNORE)
+})

@@ -26,6 +26,7 @@ import {
 } from '../services/batterySafety'
 import {formatDiskSpace, formatDiskUsageWarning} from '../services/diskSpace'
 import {formatEkfHealth} from '../services/ekfHealth'
+import {normalizeGeofenceAlert} from '../services/geofenceAlert'
 import {
     CLEAR_LOGS_CONFIRM_TEXT,
     formatOperationalLogCleanup,
@@ -121,6 +122,7 @@ export const useGcsStore = defineStore('gcs', () => {
         download: {phase: 'IDLE', pendingRequestId: null, error: null},
         clear: {phase: 'IDLE', pendingRequestId: null, error: null}
     })
+    const geofenceAlert = reactive(normalizeGeofenceAlert(null));
     
     // --- 3. 规划器状态 ---
     const plannerMode = ref('manual'); // 'manual' | 'area' | 'geofence'
@@ -1144,6 +1146,12 @@ export const useGcsStore = defineStore('gcs', () => {
                 }
                 if (payload.control_state) {
                     Object.assign(controlStatus, payload.control_state);
+                }
+                if (payload.geofence_alert) {
+                    Object.assign(
+                        geofenceAlert,
+                        normalizeGeofenceAlert(payload.geofence_alert)
+                    );
                 }
                 break;
             case 'DATA_PROPULSION_FEEDBACK':
@@ -2384,6 +2392,7 @@ export const useGcsStore = defineStore('gcs', () => {
         vehicle,
         mission,
         geofence,
+        geofenceAlert,
         mapTriggers,
         sysLogs,
         plannerMode,

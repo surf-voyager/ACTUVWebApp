@@ -12,6 +12,7 @@
     "test:mission-file": "node --test test/missionFile.test.mjs",
     "test:mission-completion": "node --test test/missionCompletion.test.mjs",
     "test:geofence": "node --test test/geofence.test.mjs test/geofenceFile.test.mjs",
+    "test:geofence-alert": "node --test test/geofenceAlert.test.mjs",
     "test:notifications": "node --test test/systemNotifications.test.mjs",
     "test:battery-safety": "node --test test/batterySafety.test.mjs",
     "test:position": "node --test test/positionDisplay.test.mjs",

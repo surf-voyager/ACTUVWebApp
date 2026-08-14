@@ -830,6 +830,7 @@ const {
   isWsConnected,
   wsUrl,
   controlStatus,
+  geofenceAlert,
   batteryThresholdConfig,
   infoQuery,
   waypointAcceptanceRadius,
@@ -1725,7 +1726,8 @@ watch(() => vehicle.value.mode, (newMode) => {
       missionState: missionState.value,
       current: mission.value.progress.current,
       total: mission.value.progress.total,
-      elapsedSinceStartMs: elapsedAtHold
+      elapsedSinceStartMs: elapsedAtHold,
+      geofenceAlertActive: geofenceAlert.value.active
     });
 
     if (disposition === MISSION_HOLD_DISPOSITION.COMPLETE) {
@@ -1739,12 +1741,18 @@ watch(() => vehicle.value.mode, (newMode) => {
     store.sendPacket('CMD_MISSION_CONTROL', {action: 'SET_INDEX', index: targetIndex}, {silentSuccess: true});
 
     setTimeout(() => {
+      if (geofenceAlert.value.active) return;
       if (!vehicle.value.armed) {
         sendArmCommand('ARM', false, {silentSuccess: true});
       }
       store.sendPacket('CMD_MISSION_CONTROL', {action: 'RESUME'}, {silentSuccess: true});
     }, 500);
   }, MISSION_HOLD_SETTLE_MS);
+});
+
+// 围栏保护优先级高于任务启动阶段的 HOLD 自动恢复。
+watch(() => geofenceAlert.value.active, (active) => {
+  if (active) clearMissionHoldTimer();
 });
 
 // 如果任务进度比模式更新更晚到达，仍能把预期 HOLD 识别为正常完成。
@@ -1754,7 +1762,8 @@ watch(() => [mission.value.progress.current, mission.value.progress.total], ([cu
     missionState: missionState.value,
     current,
     total,
-    elapsedSinceStartMs: Date.now() - lastMissionStartTime.value
+    elapsedSinceStartMs: Date.now() - lastMissionStartTime.value,
+    geofenceAlertActive: geofenceAlert.value.active
   });
   if (disposition === MISSION_HOLD_DISPOSITION.COMPLETE) {
     markMissionCompleted();

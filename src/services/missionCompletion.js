@@ -10,8 +10,12 @@ export function missionHoldDisposition({
   current,
   total,
   elapsedSinceStartMs,
+  geofenceAlertActive = false,
   recoveryWindowMs = 5000,
 }) {
+  if (geofenceAlertActive) {
+    return MISSION_HOLD_DISPOSITION.IGNORE
+  }
   if (flightMode !== 'HOLD' || missionState !== 'EXECUTING') {
     return MISSION_HOLD_DISPOSITION.IGNORE
   }
