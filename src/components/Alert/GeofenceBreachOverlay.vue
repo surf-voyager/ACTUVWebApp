@@ -27,7 +27,10 @@
 import {onUnmounted, ref, watch} from 'vue';
 import {storeToRefs} from 'pinia';
 import {useGcsStore} from '../../store/useGcsStore';
-import {GEOFENCE_ALERT_DISPLAY_DURATION_MS} from '../../services/geofenceAlert';
+import {
+  GEOFENCE_ALERT_DISPLAY_DURATION_MS,
+  shouldPresentGeofenceAlert
+} from '../../services/geofenceAlert';
 import {
   startGeofenceAlarmAudio,
   stopGeofenceAlarmAudio
@@ -37,6 +40,23 @@ const store = useGcsStore();
 const {geofenceAlert} = storeToRefs(store);
 const isVisible = ref(false);
 let hideTimer = null;
+const shownEventStorageKey = 'actuv.geofence-alert.last-shown-event-id';
+
+const readShownEventId = () => {
+  try {
+    return window.sessionStorage.getItem(shownEventStorageKey);
+  } catch (_) {
+    return null;
+  }
+};
+
+const rememberShownEventId = (eventId) => {
+  try {
+    window.sessionStorage.setItem(shownEventStorageKey, eventId);
+  } catch (_) {
+    // 存储被禁用时仍正常显示告警，仅无法跨刷新去重。
+  }
+};
 
 const clearHideTimer = () => {
   if (hideTimer === null) return;
@@ -44,12 +64,22 @@ const clearHideTimer = () => {
   hideTimer = null;
 };
 
-watch(() => geofenceAlert.value.active, (active) => {
+watch(() => [
+  geofenceAlert.value.active,
+  geofenceAlert.value.breachEventId
+], ([active, eventId]) => {
   clearHideTimer();
   if (!active) {
     isVisible.value = false;
     return;
   }
+  if (!shouldPresentGeofenceAlert(
+      geofenceAlert.value, readShownEventId()
+  )) {
+    isVisible.value = false;
+    return;
+  }
+  if (eventId) rememberShownEventId(eventId);
   isVisible.value = true;
   hideTimer = setTimeout(() => {
     hideTimer = null;

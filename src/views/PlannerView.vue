@@ -16,11 +16,11 @@
               <div class="defaults-bar">
                 <span class="bar-label">默认值:</span>
                 <div class="input-group">
-                  <span>速度</span>
+                  <span>速度(m/s)</span>
                   <input type="number" class="hud-input mini" v-model.number="mission.defaults.speed" step="0.5">
                 </div>
                 <div class="input-group">
-                  <span>停留</span>
+                  <span>停留(s)</span>
                   <input type="number" class="hud-input mini" v-model.number="mission.defaults.loiter">
                 </div>
               </div>
@@ -83,13 +83,13 @@
                   </template>
                 </el-table-column>
 
-                <el-table-column label="速度" min-width="90" align="center">
+                <el-table-column label="速度(m/s)" min-width="90" align="center">
                   <template #default="scope">
                     <input type="number" class="hud-input" v-model.number="scope.row.speed" step="0.5" min="0">
                   </template>
                 </el-table-column>
 
-                <el-table-column label="停留" min-width="90" align="center">
+                <el-table-column label="停留(s)" min-width="90" align="center">
                   <template #default="scope">
                     <input type="number" class="hud-input" v-model.number="scope.row.loiter" min="0">
                   </template>
