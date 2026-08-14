@@ -61,7 +61,16 @@ try {
     $status = $null
     while ($null -eq $status) {
         $value = $stream.ReadByte()
-        if ($value -lt 0) { throw 'Caster closed before sending status' }
+        if ($value -lt 0) {
+            if ($header.Count -gt 0) {
+                $partialStatus = [Text.Encoding]::ASCII.GetString($header.ToArray()).Trim()
+                if ($partialStatus -match '^(ICY|HTTP/\S+)\s+\d{3}\b') {
+                    $status = $partialStatus
+                    break
+                }
+            }
+            throw 'Caster closed before sending status'
+        }
         $header.Add([byte]$value)
         $count = $header.Count
         if ($count -ge 2 -and $header[$count - 2] -eq 13 -and $header[$count - 1] -eq 10) {
@@ -127,4 +136,3 @@ catch {
 finally {
     if ($null -ne $client) { $client.Dispose() }
 }
-

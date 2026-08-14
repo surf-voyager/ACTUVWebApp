@@ -107,3 +107,50 @@ test('temporary connection test rejects an authenticated stream without valid RT
   const result = await resultReceived
   assert.equal(result.code, 'no_data')
 })
+
+test('temporary connection test reports an unterminated 401 as authentication failure', async (context) => {
+  const caster = net.createServer((socket) => {
+    socket.once('data', () => socket.end('HTTP/1.0 401 Unauthorized'))
+  })
+  caster.listen(0, '127.0.0.1')
+  await once(caster, 'listening')
+  context.after(() => caster.close())
+
+  let resultResolve
+  const resultReceived = new Promise((resolve) => { resultResolve = resolve })
+  const client = {
+    send(event, payload) {
+      if (event === 'ntrip:test-status' && payload.code === 'auth_failed') resultResolve(payload)
+    },
+  }
+  const session = new NtripConnectionTestSession(client, '', console, () => {}, 1000)
+  context.after(() => session.stop())
+  const {port} = caster.address()
+  session.start({host: '127.0.0.1', port, mountpoint: 'AUTO', username: 'test', password: 'wrong'})
+
+  const result = await resultReceived
+  assert.equal(result.code, 'auth_failed')
+  assert.match(result.message, /401 Unauthorized/)
+})
+
+test('temporary connection test keeps a genuinely silent caster classified as timeout', async (context) => {
+  const caster = net.createServer(() => {})
+  caster.listen(0, '127.0.0.1')
+  await once(caster, 'listening')
+  context.after(() => caster.close())
+
+  let resultResolve
+  const resultReceived = new Promise((resolve) => { resultResolve = resolve })
+  const client = {
+    send(event, payload) {
+      if (event === 'ntrip:test-status' && payload.code === 'test_timeout') resultResolve(payload)
+    },
+  }
+  const session = new NtripConnectionTestSession(client, '', console, () => {}, 50)
+  context.after(() => session.stop())
+  const {port} = caster.address()
+  session.start({host: '127.0.0.1', port, mountpoint: 'AUTO', username: 'test', password: 'secret'})
+
+  const result = await resultReceived
+  assert.equal(result.code, 'test_timeout')
+})

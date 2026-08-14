@@ -69,19 +69,26 @@ export function buildNtripRequest(config, position) {
   ].join('\r\n'), 'ascii')
 }
 
-export function parseNtripResponseHeader(buffer) {
+export function parseNtripResponseHeader(buffer, {endOfStream = false} = {}) {
   const lineEnd = buffer.indexOf('\r\n')
-  if (lineEnd < 0) return null
+  if (lineEnd < 0) {
+    if (!endOfStream) return null
+    const status = buffer.toString('latin1').trim()
+    if (!/^(?:ICY|HTTP\/\S+)\s+\d{3}\b/i.test(status)) return null
+    return {status, payloadOffset: buffer.length}
+  }
   const status = buffer.subarray(0, lineEnd).toString('latin1')
   if (/^ICY\s+/i.test(status)) {
     return { status, payloadOffset: lineEnd + 2 }
   }
   const headerEnd = buffer.indexOf('\r\n\r\n')
-  if (headerEnd < 0) return null
+  if (headerEnd < 0) {
+    if (!endOfStream || !/^HTTP\/\S+\s+\d{3}\b/i.test(status)) return null
+    return {status, payloadOffset: buffer.length}
+  }
   return { status, payloadOffset: headerEnd + 4 }
 }
 
 export function statusIsSuccessful(status) {
   return /(?:^ICY\s+200\b|^HTTP\/\d(?:\.\d)?\s+200\b)/i.test(String(status))
 }
-

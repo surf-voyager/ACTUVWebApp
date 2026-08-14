@@ -117,6 +117,22 @@ export class NtripBridgeSession {
     this.socket = socket
     socket.setTimeout(CONNECT_TIMEOUT_MS)
 
+    const responseError = (status) => {
+      const error = new Error(`NTRIP rejected request: ${status}`)
+      error.code = /\b(?:401|403)\b/.test(status) ? 'AUTH_FAILED' : 'NTRIP_REJECTED'
+      return error
+    }
+    const handlePreAuthFailure = (error) => {
+      if (generation !== this.generation) return
+      if (isWsl() && error.code !== 'AUTH_FAILED' && error.code !== 'NTRIP_REJECTED') {
+        this.preferWindowsTransport = true
+        this.closeTransport(false)
+        this.connect()
+        return
+      }
+      this.handleTransportFailure(error, error.code === 'AUTH_FAILED' ? 'auth_failed' : 'network_error')
+    }
+
     socket.once('connect', () => {
       if (generation !== this.generation) return
       socket.write(buildNtripRequest(this.config, this.position))
@@ -132,9 +148,7 @@ export class NtripBridgeSession {
         const parsed = parseNtripResponseHeader(header)
         if (!parsed) return
         if (!statusIsSuccessful(parsed.status)) {
-          const error = new Error(`NTRIP rejected request: ${parsed.status}`)
-          error.code = /401|403/.test(parsed.status) ? 'AUTH_FAILED' : 'NTRIP_REJECTED'
-          socket.destroy(error)
+          socket.destroy(responseError(parsed.status))
           return
         }
         authenticated = true
@@ -150,21 +164,24 @@ export class NtripBridgeSession {
       this.emitData(chunk)
     })
     socket.once('timeout', () => socket.destroy(Object.assign(new Error('NTRIP connection timed out'), { code: 'ETIMEDOUT' })))
-    socket.once('error', (error) => {
-      if (generation !== this.generation) return
-      if (isWsl() && !authenticated && error.code !== 'AUTH_FAILED' && error.code !== 'NTRIP_REJECTED') {
-        this.preferWindowsTransport = true
-        this.closeTransport(false)
-        this.connect()
-        return
-      }
-      this.handleTransportFailure(error, error.code === 'AUTH_FAILED' ? 'auth_failed' : 'network_error')
-    })
+    socket.once('error', (error) => handlePreAuthFailure(error))
     socket.once('close', () => {
       if (generation !== this.generation || this.socket !== socket) return
       this.socket = null
       this.clearGgaTimer()
-      if (authenticated) this.handleTransportFailure(new Error('NTRIP stream closed'), 'network_error')
+      if (authenticated) {
+        this.handleTransportFailure(new Error('NTRIP stream closed'), 'network_error')
+        return
+      }
+      const parsed = parseNtripResponseHeader(header, {endOfStream: true})
+      if (parsed && !statusIsSuccessful(parsed.status)) {
+        handlePreAuthFailure(responseError(parsed.status))
+        return
+      }
+      handlePreAuthFailure(Object.assign(
+        new Error('Caster closed before sending a complete NTRIP status'),
+        {code: 'ECONNRESET'},
+      ))
     })
   }
 

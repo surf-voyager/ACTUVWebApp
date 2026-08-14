@@ -44,3 +44,15 @@ test('parses ICY and HTTP response headers', () => {
   assert.equal(statusIsSuccessful('HTTP/1.1 401 Unauthorized'), false)
 })
 
+test('parses an unterminated HTTP status only after the stream ends', () => {
+  const response = Buffer.from('HTTP/1.0 401 Unauthorized', 'ascii')
+  assert.equal(parseNtripResponseHeader(response), null)
+  assert.deepEqual(parseNtripResponseHeader(response, {endOfStream: true}), {
+    status: 'HTTP/1.0 401 Unauthorized',
+    payloadOffset: response.length,
+  })
+  assert.equal(
+    parseNtripResponseHeader(Buffer.from('not an NTRIP response'), {endOfStream: true}),
+    null,
+  )
+})
