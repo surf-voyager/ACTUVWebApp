@@ -172,7 +172,7 @@
                 :title="batteryThresholdDisabledReason"
                 @click="handleThresholdConfigure"
               >
-                <el-icon v-if="batteryThresholdConfig.phase === 'PENDING'" class="is-loading">
+                <el-icon v-if="batteryThresholdConfig.phase === 'PENDING'" class="threshold-loading-icon">
                   <Loading />
                 </el-icon>
                 {{ batteryThresholdConfig.phase === 'PENDING' ? '配置中' : '配置' }}
@@ -692,7 +692,7 @@
               :loading="ntripDialog.test.phase === 'testing'"
               :disabled="ntripDialog.test.phase === 'testing'"
               @click="startNtripConnectionTest"
-              class="hud-btn-confirm"
+              class="hud-btn-confirm ntrip-test-button"
           >
             <template v-if="ntripDialog.test.phase === 'success'">
               <el-icon><CircleCheckFilled/></el-icon>
@@ -2273,7 +2273,7 @@ onUnmounted(() => {
 .threshold-status.error { color: #f56c6c; }
 .threshold-status.pending { color: #e6a23c; }
 
-.is-loading {
+.threshold-loading-icon {
   animation: threshold-spin 0.9s linear infinite;
 }
 
@@ -3196,6 +3196,15 @@ onUnmounted(() => {
   background: #409EFF;
   border: none;
   font-weight: bold;
+}
+
+.ntrip-test-button :deep(.el-icon.is-loading) {
+  order: 1;
+  margin-left: 6px;
+}
+
+.ntrip-test-button :deep(.el-icon.is-loading + span) {
+  margin-left: 0;
 }
 
 .offline-box {

@@ -33,6 +33,10 @@ import {
     SYSTEM_MAINTENANCE_TIMEOUT_MS
 } from '../services/systemMaintenance'
 import {
+    TRANSFER_FEEDBACK_TIMEOUT_MS,
+    transferFeedbackOptions
+} from '../services/transferFeedback'
+import {
     buildMapPositionUpdate,
     normalizeDisplayPosition,
     POSITION_SOURCE_NONE
@@ -430,7 +434,9 @@ export const useGcsStore = defineStore('gcs', () => {
             pushNotification(NOTIFICATION_TITLES.geofence, '已有操作正在进行，请稍后重试', 'warning');
             return false;
         }
-        const requestId = sendPacket(commandType, payload);
+        const requestId = sendPacket(commandType, payload, {
+            transferFeedback: operation === 'upload'
+        });
         if (!requestId) return false;
         for (const name of ['upload', 'download', 'clear']) {
             if (name === operation) continue;
@@ -448,6 +454,7 @@ export const useGcsStore = defineStore('gcs', () => {
         clearGeofenceOperationTimeout();
         geofenceOperationTimeout = setTimeout(() => {
             if (geofence[operation].pendingRequestId !== requestId) return;
+            finishTransferFeedback(requestId, 'timeout');
             pendingCommands.delete(requestId);
             Object.assign(geofence[operation], {
                 phase: 'ERROR',
@@ -573,8 +580,33 @@ export const useGcsStore = defineStore('gcs', () => {
     let heartbeatTimer = null;
     let socketGeneration = 0;
     const pendingCommands = new Map();
+    const transferFeedbackMessages = new Map();
     let reconnectEnabled = true;
     const wsUrl = ref(localStorage.getItem('wsUrl') || 'ws://10.168.1.199:8765');
+
+    function finishTransferFeedback(requestId, state) {
+        const feedback = transferFeedbackMessages.get(requestId);
+        if (!feedback) return false;
+        clearTimeout(feedback.timeoutId);
+        feedback.message.close();
+        transferFeedbackMessages.delete(requestId);
+        ElMessage(transferFeedbackOptions(state));
+        return true;
+    }
+
+    function beginTransferFeedback(requestId) {
+        const message = ElMessage(transferFeedbackOptions('sending'));
+        const timeoutId = setTimeout(() => {
+            finishTransferFeedback(requestId, 'timeout');
+        }, TRANSFER_FEEDBACK_TIMEOUT_MS);
+        transferFeedbackMessages.set(requestId, {message, timeoutId});
+    }
+
+    function failAllTransferFeedback() {
+        for (const requestId of [...transferFeedbackMessages.keys()]) {
+            finishTransferFeedback(requestId, 'error');
+        }
+    }
 
 
     // ==========================================
@@ -665,6 +697,7 @@ export const useGcsStore = defineStore('gcs', () => {
                 }
                 systemMaintenance.powerOffPhase = 'POWERED_OFF';
                 systemMaintenance.powerOffRequestId = null;
+                failAllTransferFeedback();
                 pendingCommands.clear();
                 socket = null;
                 reconnectEnabled = false;
@@ -687,6 +720,7 @@ export const useGcsStore = defineStore('gcs', () => {
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             markBatteryChannelDisconnected();
+            failAllTransferFeedback();
             pendingCommands.clear();
             socket = null;
             if (heartbeatTimer) {
@@ -733,6 +767,7 @@ export const useGcsStore = defineStore('gcs', () => {
             clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
             markLeakChannelDisconnected();
             markBatteryChannelDisconnected();
+            failAllTransferFeedback();
         };
     }
     
@@ -764,6 +799,7 @@ export const useGcsStore = defineStore('gcs', () => {
         clearWaypointAcceptanceRadius('BACKEND_DISCONNECTED');
         markLeakChannelDisconnected();
         markBatteryChannelDisconnected();
+        failAllTransferFeedback();
         pendingCommands.clear();
     }
 
@@ -1210,6 +1246,7 @@ export const useGcsStore = defineStore('gcs', () => {
             successNotification: null,
             failureTitle: null
         };
+        finishTransferFeedback(request_id, success ? 'success' : 'error');
         pendingCommands.delete(request_id);
         const notificationOptions = commandContext.notificationKey
             ? {key: commandContext.notificationKey, incrementCount: false}
@@ -1594,6 +1631,9 @@ export const useGcsStore = defineStore('gcs', () => {
             }
         }
         socket.send(JSON.stringify(packet));
+        if (options.transferFeedback === true) {
+            beginTransferFeedback(requestId);
+        }
         return requestId;
     }
 

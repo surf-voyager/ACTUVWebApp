@@ -65,6 +65,45 @@ button:focus-visible {
   text-align: center;
 }
 
+.actuv-transfer-feedback.el-message {
+  min-width: 168px;
+  justify-content: center;
+  border-radius: 8px;
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.28);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.actuv-transfer-feedback.is-sending.el-message {
+  border-color: #dcdfe6;
+  background: #fff;
+}
+
+.actuv-transfer-feedback.is-sending .el-message__content,
+.actuv-transfer-feedback.is-sending .el-message__icon {
+  color: #303133;
+}
+
+.actuv-transfer-feedback.is-success.el-message {
+  border-color: #67c23a;
+  background: #67c23a;
+}
+
+.actuv-transfer-feedback.is-success .el-message__content,
+.actuv-transfer-feedback.is-success .el-message__icon {
+  color: #fff;
+}
+
+.actuv-transfer-feedback.is-error.el-message {
+  border-color: #f56c6c;
+  background: #f56c6c;
+}
+
+.actuv-transfer-feedback.is-error .el-message__content,
+.actuv-transfer-feedback.is-error .el-message__icon {
+  color: #fff;
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

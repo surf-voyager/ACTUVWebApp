@@ -584,6 +584,7 @@ const handleUpload = () => {
   store.sendPacket("CMD_UPLOAD_MISSION", {
     mission_items: missionItems
   }, {
+    transferFeedback: true,
     pendingNotification: {
       title: NOTIFICATION_TITLES.mission,
       message: `正在向飞控上传 ${missionItems.length} 个航点…`

@@ -56,6 +56,10 @@ import {
   POSITION_SOURCE_RAW_GPS,
   usesRawGpsPosition
 } from '../../services/positionDisplay';
+import {
+  shouldShowPlanningControls,
+  syncPlanningControlsVisibility
+} from '../../services/mapPlanningControls';
 
 const store = useGcsStore();
 const {
@@ -318,7 +322,7 @@ const initGeoman = () => {
     drawCircle: false, drawMarker: false, drawPolygon: true,
     drawPolyline: true, editMode: true, dragMode: true, removalMode: true
   });
-  map.pm.toggleControls(false);
+  syncPlanningControlsVisibility(map.pm, false);
 
   map.on('pm:create', async (e) => {
     const layer = e.layer;
@@ -741,24 +745,19 @@ watch(() => mapTriggers.value.clearMap, (val) => {
 });
 
 watch(plannerMode, (newMode) => {
-  if (newMode === 'manual' || newMode === 'geofence') {
-    map.pm.toggleControls(true);
-  } else {
-    map.pm.toggleControls(false);
-    map.pm.disableDraw();
-  }
+  syncPlanningControlsVisibility(
+    map?.pm,
+    shouldShowPlanningControls(route.name, newMode)
+  );
 });
 
 
 const handleModeChange = (pageName) => {
   if (!map) return;
-  if (pageName === 'planner'
-      && (plannerMode.value === 'manual' || plannerMode.value === 'geofence')) {
-    map.pm.toggleControls(true);
-  } else {
-    map.pm.toggleControls(false);
-    map.pm.disableDraw();
-  }
+  syncPlanningControlsVisibility(
+    map.pm,
+    shouldShowPlanningControls(pageName, plannerMode.value)
+  );
   // 切换页面时，重新渲染任务以更新拖动状态
   renderMissionFromStore();
   renderAreaSelection();
