@@ -311,13 +311,17 @@
           </div>
         </div>
         <div class="divider"></div>
-        <div class="telemetry-item">
-          <span class="label">电机状态</span>
+        <div class="telemetry-item flight-status-item">
+          <span class="label">飞行状态</span>
           <div class="val-group">
             <span class="value" :class="vehicle.armed ? 'armed-text' : 'disarmed-text'">{{
                 vehicle.armed ? '已解锁' : '已上锁'
               }}</span>
-            <div class="sub-label-wrap">
+            <div class="sub-label-wrap flight-status-actions">
+              <span
+                  class="flight-mode-value"
+                  :class="{'is-unknown': displayedFlightMode === '未知'}"
+              >{{ displayedFlightMode }}</span>
               <button class="hud-stop-btn" @click="handleSystemStop">系统停机</button>
             </div>
           </div>
@@ -803,6 +807,7 @@ import {
   isLowBatteryState,
   parseBatteryVoltageThreshold
 } from '../services/batterySafety';
+import {formatFlightModeForDisplay} from '../services/flightModeDisplay';
 import {
   BACKEND_MAINTENANCE_ACTIONS,
   BACKEND_MAINTENANCE_EVENT,
@@ -834,6 +839,10 @@ const infoQueryOptions = [
   {id: 'WAYPOINT_ACCEPTANCE_RADIUS', label: '航点接受半径'},
   {id: 'DISK_SPACE', label: '磁盘剩余空间'}
 ];
+
+const displayedFlightMode = computed(() =>
+  formatFlightModeForDisplay(vehicle.value.mode, vehicle.value.connected)
+);
 
 // --- 状态变量 ---
 const missionState = ref('EXECUTING');
@@ -2844,6 +2853,30 @@ onUnmounted(() => {
 .disarmed-text {
   color: #67c23a;
   text-shadow: 0 0 15px rgba(103, 194, 58, 0.6);
+}
+
+.flight-status-item {
+  min-width: 150px;
+}
+
+.flight-status-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.flight-mode-value {
+  color: #d7dbe0;
+  font-family: 'DIN Alternate', monospace;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.flight-mode-value.is-unknown {
+  color: #777;
 }
 
 .hud-stop-btn {
