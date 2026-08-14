@@ -44,11 +44,18 @@ import '@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css';
 import 'leaflet-rotatedmarker';
 
 import boatIconImg from '../../assets/navigator-arrows.svg';
+import boatIconRawGpsImg from '../../assets/navigator-arrows-raw-gps.svg';
 import { useGcsStore } from '../../store/useGcsStore';
 import { storeToRefs } from 'pinia';
 import { useRoute } from 'vue-router';
 import {ElMessage, ElMessageBox} from 'element-plus';
 import {shouldRenderWaypointAcceptanceRadius} from '../../services/waypointAcceptanceRadius';
+import {
+  isRenderableMapPosition,
+  POSITION_SOURCE_EKF,
+  POSITION_SOURCE_RAW_GPS,
+  usesRawGpsPosition
+} from '../../services/positionDisplay';
 
 const store = useGcsStore();
 const {
@@ -61,15 +68,6 @@ const {
   waypointAcceptanceRadius
 } = storeToRefs(store);
 
-const hasValidEkfPosition = (position) => {
-  const lat = Number(position?.lat);
-  const lng = Number(position?.lng);
-  return position?.valid === true
-      && Number.isFinite(lat)
-      && Number.isFinite(lng)
-      && Math.abs(lat) <= 90
-      && Math.abs(lng) <= 180;
-};
 const route = useRoute();
 
 // --- 变量定义 ---
@@ -84,6 +82,8 @@ let geofenceLayerGroup = null;
 let homeLayerGroup = null; // 新增：HOME点图层
 
 let boatMarker = null;
+let boatIcons = null;
+let activeBoatIconSource = null;
 let homeMarker = null; // 新增：HOME点标记
 let trajectoryPolyline = null;
 let trajectoryShadow = null; // <--- 轨迹阴影
@@ -248,16 +248,22 @@ const initOfflineSystem = () => {
 
 const initBoat = () => {
   if (!boatLayerGroup) return;
-  const boatIcon = L.icon({
-    iconUrl: boatIconImg,
+  const iconOptions = {
     iconSize: [48, 48],
-    iconAnchor: [24, 24],
-  });
-  const hasInitialPosition = hasValidEkfPosition(vehicle.value.position);
+    iconAnchor: [24, 24]
+  };
+  boatIcons = {
+    [POSITION_SOURCE_EKF]: L.icon({...iconOptions, iconUrl: boatIconImg}),
+    [POSITION_SOURCE_RAW_GPS]: L.icon({...iconOptions, iconUrl: boatIconRawGpsImg})
+  };
+  const hasInitialPosition = isRenderableMapPosition(vehicle.value.position);
   const startLat = hasInitialPosition ? Number(vehicle.value.position.lat) : 45.99;
   const startLng = hasInitialPosition ? Number(vehicle.value.position.lng) : 126.67;
+  activeBoatIconSource = usesRawGpsPosition(vehicle.value.position)
+    ? POSITION_SOURCE_RAW_GPS
+    : POSITION_SOURCE_EKF;
   boatMarker = L.marker([startLat, startLng], {
-    icon: boatIcon,
+    icon: boatIcons[activeBoatIconSource],
     rotationAngle: -45,
     rotationOrigin: 'center center',
     zIndexOffset: 2000
@@ -606,7 +612,7 @@ const saveCurrentArea = async () => {
 const focusBoat = () => {
   if (!map || !vehicle.value.position) return;
   const { lat, lng } = vehicle.value.position;
-  if (hasValidEkfPosition(vehicle.value.position)) {
+  if (isRenderableMapPosition(vehicle.value.position)) {
     map.flyTo([lat, lng], 18, { animate: true, duration: 1.0 });
   }
 };
@@ -653,7 +659,14 @@ defineExpose({ saveCurrentArea, focusBoat });
 
 watch(() => vehicle.value.position, (newPos) => {
   if (!boatMarker) return;
-  if (hasValidEkfPosition(newPos)) {
+  if (isRenderableMapPosition(newPos)) {
+    const iconSource = usesRawGpsPosition(newPos)
+      ? POSITION_SOURCE_RAW_GPS
+      : POSITION_SOURCE_EKF;
+    if (iconSource !== activeBoatIconSource) {
+      boatMarker.setIcon(boatIcons[iconSource]);
+      activeBoatIconSource = iconSource;
+    }
     boatMarker.setLatLng([newPos.lat, newPos.lng]);
     boatMarker.setOpacity(1);
   } else {

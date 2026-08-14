@@ -32,35 +32,11 @@ import {
     POWER_OFF_CONFIRM_TEXT,
     SYSTEM_MAINTENANCE_TIMEOUT_MS
 } from '../services/systemMaintenance'
-
-const MAVLINK_COORDINATE_SCALE = 10000000;
-const POSITION_SOURCES = new Set(['ekf', 'raw_gps']);
-
-function normalizePosition(position) {
-    if (!position || position.valid !== true || !POSITION_SOURCES.has(position.source)) return null;
-    if (position.lat == null || position.lon == null) return null;
-
-    let lat = Number(position.lat);
-    let lng = Number(position.lon);
-
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-
-    // The current backend sends degrees. Legacy MAVLink payloads use degrees * 1e7.
-    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-        lat /= MAVLINK_COORDINATE_SCALE;
-        lng /= MAVLINK_COORDINATE_SCALE;
-    }
-
-    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-
-    return {
-        lat,
-        lng,
-        source: position.source,
-        reason: position.reason ?? null,
-        ekfGlobalValid: position.ekf_global_valid === true,
-    };
-}
+import {
+    buildMapPositionUpdate,
+    normalizeDisplayPosition,
+    POSITION_SOURCE_NONE
+} from '../services/positionDisplay'
 
 export const useGcsStore = defineStore('gcs', () => {
     // --- 1. 车辆状态 ---
@@ -90,7 +66,12 @@ export const useGcsStore = defineStore('gcs', () => {
         gps: {sats: 0, fix: 'No Fix'},
         health: {is_global_position_ok: false, is_home_position_ok: false, is_armable: false},
         attitude: {roll: 0, pitch: 0, yaw: 0},
-        position: {lat: 45.7700000, lng: 126.6700000, valid: false}, // 默认地图位置，不代表实时定位
+        position: {
+            lat: 45.7700000,
+            lng: 126.6700000,
+            valid: false,
+            source: POSITION_SOURCE_NONE
+        }, // 默认地图位置，不代表实时定位
         displayPosition: {
             lat: null,
             lng: null,
@@ -1062,6 +1043,7 @@ export const useGcsStore = defineStore('gcs', () => {
             ekfGlobalValid: false,
         });
         vehicle.position.valid = false;
+        vehicle.position.source = POSITION_SOURCE_NONE;
     }
 
     function handleIncomingMessage(msg) {
@@ -1070,19 +1052,13 @@ export const useGcsStore = defineStore('gcs', () => {
 
         switch (type) {
             case 'DATA_NAV': {
-                const normalizedPosition = normalizePosition(payload.position);
+                const normalizedPosition = normalizeDisplayPosition(payload.position);
 
                 if (normalizedPosition) {
                     Object.assign(vehicle.displayPosition, normalizedPosition, {valid: true});
-
-                    if (normalizedPosition.source === 'ekf') {
-                        vehicle.position.lat = normalizedPosition.lat;
-                        vehicle.position.lng = normalizedPosition.lng;
-                        vehicle.position.valid = true;
-                        vehicle.trajectory.push([normalizedPosition.lat, normalizedPosition.lng]);
-                    } else {
-                        vehicle.position.valid = false;
-                    }
+                    const mapUpdate = buildMapPositionUpdate(normalizedPosition);
+                    Object.assign(vehicle.position, mapUpdate.position);
+                    vehicle.trajectory.push(mapUpdate.trajectoryPoint);
                 } else {
                     clearLivePosition(payload.position?.reason);
                 }
