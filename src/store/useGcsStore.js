@@ -9,6 +9,7 @@ import {
     waypointRadiusQueryDisposition
 } from '../services/waypointAcceptanceRadius'
 import {
+    canAutoSyncGeofence,
     normalizeGeofencePoints,
     parseDownloadedGeofence,
     serializeGeofence
@@ -419,22 +420,29 @@ export const useGcsStore = defineStore('gcs', () => {
     function failPendingGeofenceOperations(message) {
         const pending = pendingGeofenceOperation();
         if (!pending) return;
-        pendingCommands.delete(geofence[pending].pendingRequestId);
+        const requestId = geofence[pending].pendingRequestId;
+        const commandContext = pendingCommands.get(requestId);
+        pendingCommands.delete(requestId);
         clearGeofenceOperationTimeout();
         Object.assign(geofence[pending], {
             phase: 'ERROR',
             pendingRequestId: null,
             error: message
         });
-        pushNotification(NOTIFICATION_TITLES.geofence, `操作失败：${message}，本地围栏已保留`, 'error');
+        if (!commandContext?.silent) {
+            pushNotification(NOTIFICATION_TITLES.geofence, `操作失败：${message}，本地围栏已保留`, 'error');
+        }
     }
 
-    function beginGeofenceOperation(operation, commandType, payload) {
+    function beginGeofenceOperation(operation, commandType, payload, {silent = false} = {}) {
         if (pendingGeofenceOperation()) {
-            pushNotification(NOTIFICATION_TITLES.geofence, '已有操作正在进行，请稍后重试', 'warning');
+            if (!silent) {
+                pushNotification(NOTIFICATION_TITLES.geofence, '已有操作正在进行，请稍后重试', 'warning');
+            }
             return false;
         }
         const requestId = sendPacket(commandType, payload, {
+            silent,
             transferFeedback: operation === 'upload'
         });
         if (!requestId) return false;
@@ -462,11 +470,13 @@ export const useGcsStore = defineStore('gcs', () => {
                 error: '请求超时，无法确认飞控围栏状态'
             });
             geofenceOperationTimeout = null;
-            pushNotification(
-                NOTIFICATION_TITLES.geofence,
-                '无法确认飞控围栏状态，本地围栏已保留',
-                'error'
-            );
+            if (!silent) {
+                pushNotification(
+                    NOTIFICATION_TITLES.geofence,
+                    '无法确认飞控围栏状态，本地围栏已保留',
+                    'error'
+                );
+            }
         }, GEOFENCE_OPERATION_TIMEOUT_MS);
         return true;
     }
@@ -1358,18 +1368,24 @@ export const useGcsStore = defineStore('gcs', () => {
             if (!success) {
                 operation.phase = 'ERROR';
                 operation.error = localizeBackendError(message, '飞控地理围栏操作失败');
-                pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
+                if (!commandContext.silent) {
+                    pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
+                }
                 return;
             }
 
             if (geofenceOperation === 'download') {
                 try {
-                    geofence.points = parseDownloadedGeofence(payload.geofence);
+                    geofence.points = payload.geofence == null
+                        ? []
+                        : parseDownloadedGeofence(payload.geofence);
                     geofence.source = 'PX4';
                 } catch (error) {
                     operation.phase = 'ERROR';
                     operation.error = error?.message || '飞控返回的围栏数据无效';
-                    pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
+                    if (!commandContext.silent) {
+                        pushNotification(NOTIFICATION_TITLES.geofence, operation.error, 'error');
+                    }
                     return;
                 }
             } else if (geofenceOperation === 'clear') {
@@ -1381,12 +1397,14 @@ export const useGcsStore = defineStore('gcs', () => {
             operation.phase = 'SUCCESS';
             operation.error = null;
             triggerRedraw();
-            pushNotification(
-                NOTIFICATION_TITLES.geofence,
-                message || '飞控地理围栏操作成功',
-                'success',
-                notificationOptions
-            );
+            if (!commandContext.silent) {
+                pushNotification(
+                    NOTIFICATION_TITLES.geofence,
+                    message || '飞控地理围栏操作成功',
+                    'success',
+                    notificationOptions
+                );
+            }
             return;
         }
         if (command_type === 'CMD_SET_WAYPOINT_ACCEPTANCE_RADIUS'
@@ -1508,6 +1526,9 @@ export const useGcsStore = defineStore('gcs', () => {
                 notificationOptions
             );
         }
+        if (commandContext.syncGeofenceAfter === true) {
+            requestGeofenceDownload({silent: true, preserveLocal: true});
+        }
     }
 
     function handleInfoQueryResult(payload = {}) {
@@ -1619,7 +1640,8 @@ export const useGcsStore = defineStore('gcs', () => {
                 silent: options.silent === true,
                 silentSuccess: options.silentSuccess === true,
                 successNotification: options.successNotification || null,
-                failureTitle: options.failureTitle || null
+                failureTitle: options.failureTitle || null,
+                syncGeofenceAfter: options.syncGeofenceAfter === true
             });
             if (options.pendingNotification) {
                 pushNotification(
@@ -1705,22 +1727,33 @@ export const useGcsStore = defineStore('gcs', () => {
         return true;
     }
 
-    function geofenceConnectionReady(operationName, {requireDisarmed = false} = {}) {
+    function geofenceConnectionReady(
+        operationName,
+        {requireDisarmed = false, silent = false} = {}
+    ) {
         if (!isWsConnected.value) {
-            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：机载服务未连接，本地围栏已保留`, 'error');
+            if (!silent) {
+                pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：机载服务未连接，本地围栏已保留`, 'error');
+            }
             return false;
         }
         if (!vehicle.connected) {
-            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控未连接，本地围栏已保留`, 'error');
+            if (!silent) {
+                pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控未连接，本地围栏已保留`, 'error');
+            }
             return false;
         }
         if (!requireDisarmed) return true;
         if (!vehicle.armedKnown) {
-            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控解锁状态未知，本地围栏已保留`, 'error');
+            if (!silent) {
+                pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控解锁状态未知，本地围栏已保留`, 'error');
+            }
             return false;
         }
         if (vehicle.armed) {
-            pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控已解锁，请先上锁再操作`, 'warning');
+            if (!silent) {
+                pushNotification(NOTIFICATION_TITLES.geofence, `${operationName}：飞控已解锁，请先上锁再操作`, 'warning');
+            }
             return false;
         }
         return true;
@@ -1740,9 +1773,18 @@ export const useGcsStore = defineStore('gcs', () => {
         return beginGeofenceOperation('upload', 'CMD_UPLOAD_GEOFENCE', payload);
     }
 
-    function requestGeofenceDownload() {
-        if (!geofenceConnectionReady('地理围栏读取失败')) return false;
-        return beginGeofenceOperation('download', 'CMD_DOWNLOAD_GEOFENCE', {});
+    function requestGeofenceDownload({silent = false, preserveLocal = false} = {}) {
+        if (preserveLocal && !canAutoSyncGeofence(geofence.points, geofence.source)) {
+            return false;
+        }
+        if (!geofenceConnectionReady('地理围栏读取失败', {silent})) return false;
+        return beginGeofenceOperation('download', 'CMD_DOWNLOAD_GEOFENCE', {}, {silent});
+    }
+
+    function requestVehiclePlanSync() {
+        return Boolean(sendPacket('CMD_DOWNLOAD_MISSION', {}, {
+            syncGeofenceAfter: true
+        }));
     }
 
     function requestGeofenceClear() {
@@ -2372,6 +2414,7 @@ export const useGcsStore = defineStore('gcs', () => {
         requestBatteryReturn,
         configureBatteryThreshold,
         requestMissionClear,
+        requestVehiclePlanSync,
         setGeofencePoints,
         removeGeofencePoint,
         requestGeofenceUpload,

@@ -95,10 +95,13 @@ export function parseDownloadedGeofence(value) {
   return normalizeGeofencePoints(value.points)
 }
 
+export function canAutoSyncGeofence(points, source) {
+  return source !== 'LOCAL' || !Array.isArray(points) || points.length === 0
+}
+
 export function serializeGeofence(points) {
   return {
     fence_type: 'INCLUSION',
     points: normalizeGeofencePoints(points)
   }
 }
-

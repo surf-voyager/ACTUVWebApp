@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  canAutoSyncGeofence,
   geofenceContainsHome,
   normalizeGeofencePoints,
   parseDownloadedGeofence,
@@ -63,6 +64,12 @@ test('download parser only accepts an inclusion polygon', () => {
   assert.throws(() => parseDownloadedGeofence({
     fence_type: 'EXCLUSION', points: triangle,
   }), /不是唯一包含型/)
+})
+
+test('automatic sync preserves unsent local geofence edits', () => {
+  assert.equal(canAutoSyncGeofence([], 'LOCAL'), true)
+  assert.equal(canAutoSyncGeofence(triangle, 'PX4'), true)
+  assert.equal(canAutoSyncGeofence(triangle, 'LOCAL'), false)
 })
 
 test('serialization has one stable protocol shape', () => {

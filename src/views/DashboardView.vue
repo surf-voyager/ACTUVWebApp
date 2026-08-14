@@ -1270,7 +1270,7 @@ watch(() => vehicle.value.connected, (connected, wasConnected) => {
         'success',
         {key: 'connection:flight-controller', incrementCount: false}
     );
-    store.sendPacket("CMD_DOWNLOAD_MISSION", {});
+    store.requestVehiclePlanSync();
     store.mapTriggers.centerMap = true;
     if (vehicle.value.mode === 'MISSION') {
       store.requestWaypointAcceptanceRadius({notifyOnError: true});
