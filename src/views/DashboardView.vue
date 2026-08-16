@@ -522,8 +522,8 @@
         <el-icon class="rotating-slow">
           <Loading/>
         </el-icon>
-        <h2>连接已断开</h2>
-        <p>正在尝试自动重连...</p>
+        <h2>{{ offlineCopy.title }}</h2>
+        <p>{{ offlineCopy.description }}</p>
         <div class="ws_disconnect_group panel-background">
           <h3>当前连接地址</h3>
           <p>{{ wsUrl }}</p>
@@ -811,6 +811,7 @@ import {
   parseBatteryVoltageThreshold
 } from '../services/batterySafety';
 import {formatFlightModeForDisplay} from '../services/flightModeDisplay';
+import {connectionUnavailableCopy} from '../services/connectionAccess';
 import {
   BACKEND_MAINTENANCE_ACTIONS,
   BACKEND_MAINTENANCE_EVENT,
@@ -847,6 +848,12 @@ const infoQueryOptions = [
 
 const displayedFlightMode = computed(() =>
   formatFlightModeForDisplay(vehicle.value.mode, vehicle.value.connected)
+);
+const offlineCopy = computed(() =>
+  connectionUnavailableCopy(isWsConnected.value, vehicle.value.connected) ?? {
+    title: '连接已恢复',
+    description: ''
+  }
 );
 
 // --- 状态变量 ---

@@ -50,7 +50,7 @@
             </el-icon>
             监控站
           </el-radio-button>
-          <el-radio-button value="planner">
+          <el-radio-button value="planner" :disabled="!navigationUnlocked">
             <el-icon>
               <MapLocation/>
             </el-icon>
@@ -63,8 +63,8 @@
 </template>
 
 <script setup>
-import {onMounted, onUnmounted, ref, watch} from 'vue'
-import {useRouter} from 'vue-router'
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
 import {useGcsStore} from './store/useGcsStore'
 import BaseMap from './components/Map/BaseMap.vue'
 import LeakAlertOverlay from './components/Alert/LeakAlertOverlay.vue'
@@ -72,14 +72,37 @@ import BatteryAlertOverlay from './components/Alert/BatteryAlertOverlay.vue'
 import GeofenceBreachOverlay from './components/Alert/GeofenceBreachOverlay.vue'
 import {MapLocation, Monitor,Aim} from '@element-plus/icons-vue'
 import {disposeLeakAlarmAudio, primeLeakAlarmAudio} from './services/leakAlarmAudio'
+import {isOperationalConnectionReady} from './services/connectionAccess'
 const mapRef = ref(null)
 const router = useRouter()
+const route = useRoute()
 const store = useGcsStore()
 const currentTab = ref('dashboard')
+const navigationUnlocked = computed(() =>
+  isOperationalConnectionReady(store.isWsConnected, store.vehicle.connected)
+)
 
 const handleTabChange = (val) => {
+  if (val === 'planner' && !navigationUnlocked.value) {
+    currentTab.value = 'dashboard'
+    return
+  }
   router.push(`/${val}`)
 }
+
+watch(
+  [() => route.name, navigationUnlocked],
+  ([routeName, unlocked]) => {
+    if (!unlocked && routeName !== 'dashboard') {
+      currentTab.value = 'dashboard'
+      void router.replace('/dashboard')
+      return
+    }
+
+    currentTab.value = routeName === 'planner' ? 'planner' : 'dashboard'
+  },
+  {immediate: true}
+)
 
 // 调用地图组件的定位方法
 const handleFocusBoat = () => {
