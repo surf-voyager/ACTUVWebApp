@@ -104,7 +104,7 @@ export const useGcsStore = defineStore('gcs', () => {
     const mission = reactive({
         plannedWaypoints: [],
         uploadedWaypoints: [],
-        defaults: {speed: 0.5, loiter: 0},
+        defaults: {speed: 0.4, loiter: 0},
         progress: {
             current: 0,
             total: 0
