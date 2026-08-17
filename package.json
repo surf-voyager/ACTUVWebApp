@@ -15,7 +15,7 @@
     "test:geofence-alert": "node --test test/geofenceAlert.test.mjs",
     "test:notifications": "node --test test/systemNotifications.test.mjs",
     "test:battery-safety": "node --test test/batterySafety.test.mjs",
-    "test:position": "node --test test/positionDisplay.test.mjs",
+    "test:position": "node --test test/positionDisplay.test.mjs test/gpsHeading.test.mjs",
     "test:backend-maintenance": "node --test test/backendMaintenance.test.mjs",
     "test:system-maintenance": "node --test test/systemMaintenance.test.mjs",
     "test:startup": "node --test test/startFrontend.test.mjs",
