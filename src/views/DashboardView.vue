@@ -299,13 +299,6 @@
                 <span v-else class="coordinate-placeholder">--</span>
               </div>
             </div>
-            <div class="gps-heading" :class="{'is-valid': gpsHeadingValid}" title="双天线GPS航向">
-              <div class="gps-heading-dial">
-                <span class="gps-heading-north">N</span>
-                <span class="gps-heading-pointer" :style="gpsHeadingPointerStyle"></span>
-              </div>
-              <span class="gps-heading-value">{{ gpsHeadingText }}</span>
-            </div>
           </div>
         </div>
         <div class="divider"></div>
@@ -819,7 +812,6 @@ import {
 } from '../services/batterySafety';
 import {formatFlightModeForDisplay} from '../services/flightModeDisplay';
 import {connectionUnavailableCopy} from '../services/connectionAccess';
-import {formatGpsHeading} from '../services/gpsHeading';
 import {
   BACKEND_MAINTENANCE_ACTIONS,
   BACKEND_MAINTENANCE_EVENT,
@@ -1333,18 +1325,6 @@ const satelliteCount = computed(() => {
   const count = Number(vehicle.value.gps.sats);
   return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 });
-
-const gpsHeadingValid = computed(() => (
-  vehicle.value.connected
-  && vehicle.value.gpsHeading.valid === true
-  && Number.isFinite(Number(vehicle.value.gpsHeading.yaw))
-));
-const gpsHeadingText = computed(() => formatGpsHeading(
-  gpsHeadingValid.value ? vehicle.value.gpsHeading : null
-));
-const gpsHeadingPointerStyle = computed(() => ({
-  transform: `rotate(${gpsHeadingValid.value ? Number(vehicle.value.gpsHeading.yaw) : 0}deg)`
-}));
 
 const POSITION_SOURCE_DISPLAY = Object.freeze({
   ekf: {label: 'EKF 全局位置', className: 'source-ekf'},
@@ -2501,93 +2481,16 @@ onUnmounted(() => {
 }
 
 .location-item {
-  width: 320px;
-  min-width: 320px;
+  width: 292px;
+  min-width: 292px;
   gap: 5px;
 }
 
 .location-content {
   display: grid;
-  grid-template-columns: 72px 176px 54px;
+  grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
-  column-gap: 8px;
-  justify-content: start;
-}
-
-.gps-heading {
-  height: 58px;
-  padding-left: 8px;
-  transform: translateY(5px);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  color: #909399;
-}
-
-.gps-heading-dial {
-  position: relative;
-  width: 38px;
-  height: 38px;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  opacity: 0.75;
-}
-
-.gps-heading-north {
-  position: absolute;
-  top: -1px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 8px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.gps-heading-pointer {
-  position: absolute;
-  inset: 5px 17px;
-  transform-origin: 50% 50%;
-}
-
-.gps-heading-pointer::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 50%;
-  width: 0;
-  height: 0;
-  transform: translateX(-50%);
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-bottom: 13px solid currentColor;
-}
-
-.gps-heading-pointer::after {
-  content: '';
-  position: absolute;
-  top: 13px;
-  left: 50%;
-  width: 2px;
-  height: 11px;
-  transform: translateX(-50%);
-  border-radius: 2px;
-  background: currentColor;
-}
-
-.gps-heading.is-valid {
-  color: #67c23a;
-}
-
-.gps-heading-value {
-  width: 38px;
-  color: #909399;
-  font-family: 'Roboto Mono', monospace;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  text-align: center;
+  column-gap: 16px;
 }
 
 .gps-summary {

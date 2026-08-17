@@ -44,7 +44,6 @@ import {
     normalizeDisplayPosition,
     POSITION_SOURCE_NONE
 } from '../services/positionDisplay'
-import {normalizeGpsHeading} from '../services/gpsHeading'
 
 export const useGcsStore = defineStore('gcs', () => {
     // --- 1. 车辆状态 ---
@@ -72,7 +71,6 @@ export const useGcsStore = defineStore('gcs', () => {
             safety_return_lock: false
         },
         gps: {sats: 0, fix: 'No Fix'},
-        gpsHeading: {yaw: null, valid: false},
         health: {is_global_position_ok: false, is_home_position_ok: false, is_armable: false},
         attitude: {roll: 0, pitch: 0, yaw: 0},
         position: {
@@ -717,7 +715,6 @@ export const useGcsStore = defineStore('gcs', () => {
             vehicle.connected = false;
             vehicle.armedKnown = false;
             clearLivePosition('BACKEND_DISCONNECTED');
-            clearGpsHeading();
             resetPropulsionFeedback('backend_disconnected');
             if (expectedPowerOff) {
                 resetLogCleanupState();
@@ -790,7 +787,6 @@ export const useGcsStore = defineStore('gcs', () => {
                 return;
             }
             clearLivePosition('BACKEND_DISCONNECTED');
-            clearGpsHeading();
             resetPropulsionFeedback('backend_disconnected');
             failPendingInfoQuery('BACKEND_DISCONNECTED');
             failPendingMissionClear('后端连接异常，本地航点已保留');
@@ -822,7 +818,6 @@ export const useGcsStore = defineStore('gcs', () => {
         vehicle.connected = false;
         vehicle.armedKnown = false;
         clearLivePosition('BACKEND_DISCONNECTED');
-        clearGpsHeading();
         resetPropulsionFeedback('backend_disconnected');
         resetLogCleanupState();
         failPendingInfoQuery('BACKEND_DISCONNECTED');
@@ -1114,10 +1109,6 @@ export const useGcsStore = defineStore('gcs', () => {
         vehicle.position.source = POSITION_SOURCE_NONE;
     }
 
-    function clearGpsHeading() {
-        Object.assign(vehicle.gpsHeading, {yaw: null, valid: false});
-    }
-
     function handleIncomingMessage(msg) {
         const {type, payload} = msg;
         leakAlert.lastBackendMessageAt = monotonicNow();
@@ -1125,7 +1116,6 @@ export const useGcsStore = defineStore('gcs', () => {
         switch (type) {
             case 'DATA_NAV': {
                 const normalizedPosition = normalizeDisplayPosition(payload.position);
-                Object.assign(vehicle.gpsHeading, normalizeGpsHeading(payload.gps_heading));
 
                 if (normalizedPosition) {
                     Object.assign(vehicle.displayPosition, normalizedPosition, {valid: true});
@@ -1153,7 +1143,6 @@ export const useGcsStore = defineStore('gcs', () => {
                 vehicle.connected = payload.is_connected;
                 if (!vehicle.connected) {
                     clearLivePosition('PX4_DISCONNECTED');
-                    clearGpsHeading();
                     clearWaypointAcceptanceRadius('PX4_DISCONNECTED');
                 }
                 vehicle.armed = payload.is_armed;
